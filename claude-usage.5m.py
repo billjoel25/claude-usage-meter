@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # <xbar.title>Claude Plan Usage</xbar.title>
-# <xbar.version>1.0</xbar.version>
+# <xbar.version>1.1.0</xbar.version>
 # <xbar.author>billjoel25</xbar.author>
 # <xbar.author.github>billjoel25</xbar.author.github>
-# <xbar.desc>Live Claude Pro/Max plan usage in the menu bar: the rolling 5-hour window and the weekly limit, for one or more accounts. Reads the same server-truth numbers Claude enforces (api.anthropic.com/api/oauth/usage) using your existing Claude Code login. Not API $ cost.</xbar.desc>
+# <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the rolling 5-hour window and the weekly limit, for one or more accounts. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
 # <xbar.abouturl>https://github.com/billjoel25/claude-usage-meter</xbar.abouturl>
 # <swiftbar.hideAbout>false</swiftbar.hideAbout>
@@ -17,9 +17,9 @@
 #   • weekly  = the 7-day cap (Anthropic's "seven_day")
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
 #
-# Multiple accounts are supported — each just needs a way to reach its OAuth token
-# (macOS Keychain, a credentials file, or a shell command). See README.md for setup,
-# or the "About / setup" item in the dropdown.
+# Sign in from the menu ("Add Claude account") — no Claude Code CLI needed.
+# Multiple accounts are supported; tokens are stored locally and auto-refreshed.
+# An existing Claude Code login is also auto-detected. See README.md.
 #
 # Config (optional): ~/.config/claude-usage-meter/config.json — see load_config().
 
@@ -29,8 +29,12 @@ import ssl
 import subprocess
 import sys
 import time
+import base64
+import hashlib
+import secrets
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -40,6 +44,7 @@ CACHE_TTL = 180          # seconds — the endpoint 429s if polled harder than ~
 HTTP_TIMEOUT = 12        # seconds
 APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.config/claude-usage-meter"))
 CACHE_DIR = os.path.join(APP_DIR, "cache")
+ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 
 # Utilization thresholds -> severity. Green until half, amber, red near the ceiling.
 AMBER_AT = 50
@@ -137,6 +142,8 @@ def _token_from_blob(blob):
 def get_token(acct):
     """Resolve an account's bearer token from the first source that works.
     Returns (token, expires_at_ms, source_label) or (None, None, why-it-failed)."""
+    if acct.get("access_token") and acct.get("refresh_token"):
+        return _oauth_token(acct)
     # 1) Explicit shell command that prints a bare token (max flexibility).
     cmd = acct.get("token_cmd")
     if cmd:
@@ -381,12 +388,237 @@ def account_lines(acct, res):
     if res["error"]:
         lines.append(f"  ⚠︎ {res['error']} | size=12 color={color_param('amber')} trim=false")
 
+    if acct.get("kind") == "oauth" or acct.get("refresh_token"):
+        lines.append(f"  ↳ sign out | bash=/bin/rm param1=-f param2={account_file(label)} "
+                     f"terminal=false refresh=true color={color_param('dim')} size=11 trim=false")
+
     return lines, worst
 
 
+# ------------------------------------------------------------------ sign in (OAuth)
+# A friendly "Sign in with Claude" flow (Authorization Code + PKCE) so users don't
+# need the Claude Code CLI or manual Keychain wiring. Uses Claude's public OAuth
+# client; access + refresh tokens are stored per account under ACCOUNTS_DIR and
+# refreshed automatically. Endpoints/scopes match Claude Code's subscription login.
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+OAUTH_AUTHORIZE = "https://claude.ai/oauth/authorize"
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+OAUTH_REDIRECT = "https://platform.claude.com/oauth/code/callback"
+OAUTH_SCOPE = "user:inference user:profile"  # profile is required by the usage endpoint
+
+
+def _b64url(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _pkce():
+    verifier = _b64url(secrets.token_bytes(32))
+    challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
+    return verifier, challenge
+
+
+def _authorize_url(challenge, state):
+    q = urllib.parse.urlencode({
+        "code": "true",
+        "client_id": OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": OAUTH_REDIRECT,
+        "scope": OAUTH_SCOPE,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    })
+    return f"{OAUTH_AUTHORIZE}?{q}"
+
+
+def _oauth_post(payload):
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(OAUTH_TOKEN_URL, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": UA,
+    })
+    with urllib.request.urlopen(req, timeout=120, context=ssl.create_default_context()) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def account_file(label):
+    return os.path.join(ACCOUNTS_DIR, f"{_slug(label)}.json")
+
+
+def _store_tokens(label, tok, email=None):
+    os.makedirs(ACCOUNTS_DIR, exist_ok=True)
+    exp = tok.get("expires_in")
+    data = {
+        "label": label,
+        "kind": "oauth",
+        "access_token": tok.get("access_token"),
+        "refresh_token": tok.get("refresh_token"),
+        "expires_at": int(time.time() * 1000) + int(exp) * 1000 if exp else None,
+        "email": email or (tok.get("account") or {}).get("email_address"),
+        "client_id": OAUTH_CLIENT_ID,
+    }
+    p = account_file(label)
+    with open(p, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.chmod(p, 0o600)
+    return data
+
+
+def _oauth_token(acct):
+    """(access_token, expires_at_ms, source) for an app-managed account, refreshing
+    via the refresh_token when the access token is stale."""
+    now_ms = int(time.time() * 1000)
+    exp = acct.get("expires_at")
+    if exp and exp - now_ms > 60_000:
+        return acct.get("access_token"), exp, "signed in"
+    rt = acct.get("refresh_token")
+    if not rt:
+        return acct.get("access_token"), exp, "signed in"
+    try:
+        new = _oauth_post({"grant_type": "refresh_token",
+                           "refresh_token": rt, "client_id": OAUTH_CLIENT_ID})
+        if not new.get("refresh_token"):
+            new["refresh_token"] = rt
+        data = _store_tokens(acct.get("label", "account"), new, email=acct.get("email"))
+        return data["access_token"], data["expires_at"], "signed in"
+    except Exception:
+        if acct.get("access_token"):
+            return acct.get("access_token"), exp, "signed in"
+        return None, None, "sign-in expired — re-add the account"
+
+
+def _app_accounts():
+    out = []
+    if os.path.isdir(ACCOUNTS_DIR):
+        for fn in sorted(os.listdir(ACCOUNTS_DIR)):
+            if fn.endswith(".json"):
+                try:
+                    with open(os.path.join(ACCOUNTS_DIR, fn)) as fh:
+                        a = json.load(fh)
+                    if a.get("access_token"):
+                        a.setdefault("label", fn[:-5])
+                        a["kind"] = "oauth"
+                        out.append(a)
+                except Exception:
+                    pass
+    return out
+
+
+def _manual_accounts():
+    for p in config_candidates():
+        if os.path.exists(p):
+            try:
+                with open(p) as fh:
+                    cfg = json.load(fh)
+                if isinstance(cfg, dict) and isinstance(cfg.get("accounts"), list):
+                    return cfg["accounts"]
+            except Exception:
+                pass
+    return []
+
+
+def load_accounts():
+    app = _app_accounts()
+    seen = {a.get("label") for a in app}
+    manual = [a for a in _manual_accounts() if a.get("label") not in seen]
+    return (app + manual) or default_config()["accounts"]
+
+
+def do_signin():
+    """Interactive 'Sign in with Claude' — launched in a Terminal from the menu."""
+    label_arg = sys.argv[2] if len(sys.argv) > 2 else ""
+    print("\n  Sign in to Claude — add an account to your usage meter")
+    print("  " + "-" * 53)
+    verifier, challenge = _pkce()
+    state = _b64url(secrets.token_bytes(32))
+    url = _authorize_url(challenge, state)
+    print("\n  1) A browser window will open. Sign in and approve access.")
+    print("     (If it doesn't open, paste this URL into your browser:)\n")
+    print("     " + url + "\n")
+    try:
+        subprocess.run(["open", url], check=False)
+    except Exception:
+        pass
+    print("  2) Claude then shows you a code that looks like  ABC123#XYZ")
+    try:
+        raw = input("\n  3) Paste the whole code here and press Enter:\n     > ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Aborted.\n")
+        return
+    if not raw:
+        print("\n  ✗ No code entered. Nothing changed.\n")
+        return
+    code = raw.split("#", 1)[0].strip()
+    ret_state = raw.split("#", 1)[1].strip() if "#" in raw else ""
+    if ret_state and ret_state != state:
+        print("\n  ⚠︎ Security check failed (state mismatch). Please try again.\n")
+        return
+    print("\n  Signing you in…")
+    try:
+        tok = _oauth_post({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": OAUTH_REDIRECT,
+            "client_id": OAUTH_CLIENT_ID,
+            "code_verifier": verifier,
+            "state": state,
+        })
+    except Exception as e:
+        detail = ""
+        if isinstance(e, urllib.error.HTTPError):
+            try:
+                detail = " — " + e.read().decode("utf-8")[:200]
+            except Exception:
+                detail = f" — HTTP {e.code}"
+        print(f"\n  ✗ Sign-in failed{detail}\n")
+        return
+    email = (tok.get("account") or {}).get("email_address") or ""
+    default_label = label_arg or (email.split("@")[0] if email else "claude") or "claude"
+    try:
+        label = input(f"\n  Name this account [{default_label}]: ").strip() or default_label
+    except (EOFError, KeyboardInterrupt):
+        label = default_label
+    _store_tokens(label, tok, email=email)
+    who = email or label
+    print(f"\n  ✓ Signed in as {who}.")
+    print("    It appears in the menu bar within a few minutes — or click the")
+    print("    Claude icon → Refresh now.\n")
+
+
+def _footer():
+    # ---- actions ----
+    plugin = os.path.realpath(sys.argv[0])
+    print(f'➕ Add Claude account… | bash="{plugin}" param1=signin terminal=true')
+    print("Refresh now | refresh=true")
+    print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
+          f"param2={CACHE_DIR} terminal=false refresh=true")
+    print("About / setup")
+    print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
+    print("-- percentages `/usage` shows, not API dollar cost.")
+    print("-- Sign in via the menu, or an existing Claude Code login is auto-detected.")
+    print("-- Source: Anthropic’s plan-usage endpoint (api.anthropic.com/api/oauth/usage).")
+    print("-- Numbers are cached ~3 min to respect the rate limit.")
+    print(f"-- Config: {config_path()}")
+    print("-- | size=12")
+    print(f"-- Edit config file | bash=/usr/bin/open param1=-t param2={config_path()} terminal=false")
+    print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
+
+
 def main():
-    cfg = load_config()
-    accounts = cfg.get("accounts", [])
+    accounts = load_accounts()
+
+    if not (_app_accounts() or _manual_accounts()):
+        print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+        print("---")
+        print(f"Claude plan usage | size=12 color={color_param('dim')}")
+        print("---")
+        print("Not signed in yet | font=Menlo-Bold size=13 trim=false")
+        print(f"Add your Claude account below to see your 5-hour & weekly limits. "
+              f"| color={color_param('dim')} size=12 trim=false")
+        print("---")
+        _footer()
+        return
 
     results = []
     for acct in accounts:
@@ -422,22 +654,13 @@ def main():
             print(ln)
         print("---")
 
-    # ---- actions ----
-    print("Refresh now | refresh=true")
-    print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
-          f"param2={CACHE_DIR} terminal=false refresh=true")
-    print("About / setup")
-    print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
-    print("-- percentages `/usage` shows, not API dollar cost.")
-    print("-- Source: api.anthropic.com/api/oauth/usage (your Claude Code login).")
-    print("-- Numbers are cached ~3 min to respect the rate limit.")
-    print(f"-- Config: {config_path()}")
-    print("-- | size=12")
-    print(f"-- Edit config file | bash=/usr/bin/open param1=-t param2={config_path()} terminal=false")
-    print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
+    _footer()
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "signin":
+        do_signin()
+        raise SystemExit(0)
     try:
         main()
     except Exception as e:

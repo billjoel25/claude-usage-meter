@@ -2,7 +2,7 @@
 
 A tiny macOS **menu-bar** widget that shows how much of your **Claude plan** you've
 used — the rolling **5-hour** window and the **weekly** limit — at a glance, for one
-or more accounts (personal, work, etc.).
+or more accounts.
 
 It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
@@ -19,29 +19,17 @@ work
   weekly  [████████░░] 80%  resets in 4d0h
 ```
 
+- **Sign in with Claude** — one click, browser login, no CLI. Add several accounts.
 - **Pure Python 3** — no pip installs, no build step.
-- **Private** — your token is read locally and sent only to `api.anthropic.com` over
-  HTTPS. Nothing goes to any third party.
-- **Multi-account** — show several Claude logins side by side.
+- **Private** — your token is stored locally and sent only to `api.anthropic.com`
+  over HTTPS. Nothing goes to any third party.
 - Color turns amber → red as a window nears its limit; reset countdowns; per-model
   weekly limits (`seven_day_opus` / `seven_day_sonnet`) and extra-usage credits when
   your plan reports them.
 
-## How it works
-
-It reads Anthropic's usage endpoint (`GET https://api.anthropic.com/api/oauth/usage`)
-using the OAuth token from your existing **Claude Code** login — the same source
-Claude Code's `/usage` uses. On macOS the token lives in the Keychain; on Linux/WSL
-it's `~/.claude/.credentials.json`.
-
-> ⚠️ `/api/oauth/usage` is an **internal** endpoint, not a documented public API.
-> It's read-only and it's what the community usage widgets use, but Anthropic could
-> change it. If the numbers go blank, that's the first thing to check.
-
 ## Install
 
-Requires [SwiftBar](https://github.com/swiftbar/SwiftBar) (or xbar) and the Claude
-Code CLI (that's what mints the token this reads).
+Requires [SwiftBar](https://github.com/swiftbar/SwiftBar) (or xbar).
 
 ```bash
 git clone https://github.com/billjoel25/claude-usage-meter.git
@@ -51,23 +39,51 @@ brew install --cask swiftbar   # if you don't have it
 ```
 
 Open SwiftBar and set its **Plugin Folder** to the path the installer prints. The
-widget appears within ~5 min (or SwiftBar → Refresh). On first run, macOS asks to let
-SwiftBar read your Claude login from the Keychain — click **Always Allow**.
+widget appears within a few seconds.
 
-The refresh cadence is the `.5m.` in the filename (every 5 min); results are also
-cached ~3 min so manual refreshes don't trip the endpoint's rate limit.
+## Sign in
 
-## Multiple accounts
+Click the **Claude icon** in the menu bar → **➕ Add Claude account**. A Terminal
+window opens and walks you through it:
 
-Claude Code keeps one login per **config directory**, and on macOS derives a separate
-(hashed) Keychain entry for each. To run a second account beside your main one:
+1. Your browser opens to Claude's sign-in page — log in and approve.
+2. Claude shows you a short code (like `ABC123#XYZ`); paste it back into the Terminal.
+3. Name the account (or accept the default) — done.
+
+Add another account by clicking **➕ Add Claude account** again and signing in with
+the other login. To remove one, open its section in the dropdown → **↳ sign out**.
+
+Your access + refresh tokens are stored locally under
+`~/.config/claude-usage-meter/accounts/` (file permissions `600`) and refreshed
+automatically. On first read, macOS may ask to let SwiftBar use the Keychain — click
+**Always Allow**.
+
+## How it works
+
+It reads Anthropic's usage endpoint (`GET https://api.anthropic.com/api/oauth/usage`)
+with your OAuth token — the same numbers Claude Code's `/usage` shows. Sign-in uses
+the standard OAuth 2.0 Authorization-Code + PKCE flow.
+
+The refresh cadence is the `.5m.` in the filename (every 5 min); results are cached
+~3 min so manual refreshes don't trip the endpoint's rate limit.
+
+> ⚠️ `/api/oauth/usage` and the sign-in flow use **unofficial** Anthropic endpoints
+> (the same ones Claude Code uses). They're read-only and widely used by community
+> tools, but Anthropic could change them. If numbers or sign-in break, that's the
+> first thing to check.
+
+## Advanced: use an existing Claude Code login instead
+
+If you already use the **Claude Code CLI**, the widget auto-detects its login (macOS
+Keychain, or `~/.claude/.credentials.json`) — no sign-in needed. For a second CLI
+account under its own config dir:
 
 ```bash
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" claude   # log in with the 2nd account
 ```
 
-That creates an independent, auto-refreshing login without disturbing your main one.
-To point the widget at it, find that login's Keychain service name:
+Then point the widget at that login's (hashed) Keychain entry via the config file
+below. Find the service name with:
 
 ```bash
 DIR="$HOME/.claude-work"
@@ -79,13 +95,11 @@ for D in "$DIR" "$DIR/"; do
 done
 ```
 
-Add it to your config (see below) as the second account's `keychain_service`.
+### Config
 
-## Config
-
-Optional file at `~/.config/claude-usage-meter/config.json` (the installer seeds one
-from `config.example.json`). One entry per account; the widget tries each token
-source in order and shows whichever accounts resolve:
+Optional file at `~/.config/claude-usage-meter/config.json` (only needed for the
+advanced CLI/Keychain path; signed-in accounts don't need it). One entry per account;
+each account tries its token sources in order:
 
 ```json
 {
@@ -97,17 +111,12 @@ source in order and shows whichever accounts resolve:
 }
 ```
 
-Per-account keys (first that resolves wins):
-
-| key                | what it does                                                       |
-| ------------------ | ----------------------------------------------------------------- |
-| `token_cmd`        | a shell command that prints a bare bearer token (most flexible)   |
-| `token`            | a literal token (discouraged — sensitive)                         |
-| `credentials_file` | path to a Claude Code `.credentials.json`                         |
-| `keychain_service` | macOS Keychain generic-password service name                      |
-
-Config is also looked up at `$CLAUDE_USAGE_METER_CONFIG` and, for backward
-compatibility, `~/.clarity/claude-usage.json`.
+| key                | what it does                                                     |
+| ------------------ | ---------------------------------------------------------------- |
+| `token_cmd`        | a shell command that prints a bare bearer token                  |
+| `token`            | a literal token (discouraged — sensitive)                        |
+| `credentials_file` | path to a Claude Code `.credentials.json`                        |
+| `keychain_service` | macOS Keychain generic-password service name                     |
 
 ## Tuning
 
@@ -119,17 +128,16 @@ Edit the constants near the top of `claude-usage.5m.py`:
 
 ## Troubleshooting
 
-- **"not logged in"** — run `claude` once for that account.
-- **"token expired" / 401** — re-run `claude` to refresh the login.
-- **"429 — rate limited"** — you're polling too hard; it recovers next tick. Don't set
-  the refresh below a few minutes.
-- **Widget missing from the menu bar** — it's usually hidden behind the notch on a full
-  menu bar. Free up space, or use a menu-bar manager to reveal it.
+- **"not logged in"** — click **➕ Add Claude account** and sign in.
+- **"sign-in expired"** — sign out and add the account again.
+- **"429 — rate limited"** — you're polling too hard; it recovers next tick.
+- **Widget missing from the menu bar** — it's usually hidden behind the notch on a
+  full menu bar. Free up space, or use a menu-bar manager to reveal it.
 - **Numbers frozen** — dropdown → **Force refresh (clear cache)**.
 
 ## Prior art
 
-Other tools in this space (worth a look): the native apps
+Other tools in this space worth a look: the native apps
 [ClaudeMeter](https://claude-meter.com/), [Claude God](https://claudegod.app/),
 [ClaudeUsageBar](https://www.claudeusagebar.com/); and the SwiftBar/xbar plugins
 [claude-quota](https://github.com/grzegorz-raczek-unit8/claude-quota) and
