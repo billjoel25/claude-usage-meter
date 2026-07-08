@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+# <xbar.title>Claude Plan Usage</xbar.title>
+# <xbar.version>1.0</xbar.version>
+# <xbar.author>billjoel25</xbar.author>
+# <xbar.author.github>billjoel25</xbar.author.github>
+# <xbar.desc>Live Claude Pro/Max plan usage in the menu bar: the rolling 5-hour window and the weekly limit, for one or more accounts. Reads the same server-truth numbers Claude enforces (api.anthropic.com/api/oauth/usage) using your existing Claude Code login. Not API $ cost.</xbar.desc>
+# <xbar.dependencies>python3</xbar.dependencies>
+# <xbar.abouturl>https://github.com/billjoel25/claude-usage-meter</xbar.abouturl>
+# <swiftbar.hideAbout>false</swiftbar.hideAbout>
+# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
+# <swiftbar.hideLastUpdated>false</swiftbar.hideLastUpdated>
+# <swiftbar.hideDisablePlugin>false</swiftbar.hideDisablePlugin>
+#
+# Claude Plan Usage — a SwiftBar/xbar plugin. Pure Python 3, no pip installs.
+# It shows how much of your Claude *plan* you've used, not dollars:
+#   • 5-hour  = the rolling burst window
+#   • weekly  = the 7-day cap (Anthropic's "seven_day")
+# These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
+#
+# Multiple accounts are supported — each just needs a way to reach its OAuth token
+# (macOS Keychain, a credentials file, or a shell command). See README.md for setup,
+# or the "About / setup" item in the dropdown.
+#
+# Config (optional): ~/.config/claude-usage-meter/config.json — see load_config().
+
+import json
+import os
+import ssl
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+# The endpoint aggressively rate-limits requests without a claude-code User-Agent.
+UA = "claude-code/2.0.0 (claude-usage-meter)"
+CACHE_TTL = 180          # seconds — the endpoint 429s if polled harder than ~3 min
+HTTP_TIMEOUT = 12        # seconds
+APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.config/claude-usage-meter"))
+CACHE_DIR = os.path.join(APP_DIR, "cache")
+
+# Utilization thresholds -> severity. Green until half, amber, red near the ceiling.
+AMBER_AT = 50
+RED_AT = 85
+
+# (light, dark) hex so it reads on both menu-bar appearances.
+COLORS = {
+    "green": ("#1a7f37", "#3fb950"),
+    "amber": ("#9a6700", "#d4a72c"),
+    "red":   ("#cf222e", "#ff7b72"),
+    "dim":   ("#6e7781", "#8b949e"),
+}
+DOT = {"green": "🟢", "amber": "🟡", "red": "🔴", "dim": "⚪"}
+
+# SF Symbols give a cleaner, native look than emoji. Single vivid tints that read
+# on both light and dark menu bars; a gauge whose needle roughly matches the level.
+SFCOLORS = {"green": "#34c759", "amber": "#ff9f0a", "red": "#ff453a", "dim": "#98989d"}
+GAUGE = {"green": "gauge.low", "amber": "gauge.medium", "red": "gauge.high", "dim": "gauge"}
+
+
+def sf(name):
+    return SFCOLORS[name]
+
+
+# The official Claude symbol (Claude_Symbol_1.png) as a base64 PNG template image,
+# a 40px @2x (144 dpi) render so it stays crisp on Retina at ~20pt. SwiftBar tints
+# it white on a dark menu bar / black on a light one.
+CLAUDE_ICON = "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"
+
+
+# ----------------------------------------------------------------------------- config
+
+def default_config():
+    """Sensible defaults so the widget works out of the box for one account and
+    lights up a second one when its credentials become reachable."""
+    return {
+        "accounts": [
+            # Personal: whatever `claude` is logged into (macOS Keychain, file fallback).
+            {
+                "label": "personal",
+                "keychain_service": "Claude Code-credentials",
+                "credentials_file": "~/.claude/.credentials.json",
+            },
+            # A second account: a Claude Code login under its own config dir.
+            # Skipped silently until this file exists — see README (CLAUDE_CONFIG_DIR setup).
+            {
+                "label": "work",
+                "credentials_file": "~/.claude-work/.credentials.json",
+            },
+        ]
+    }
+
+
+def config_candidates():
+    cands = []
+    env = os.environ.get("CLAUDE_USAGE_METER_CONFIG")
+    if env:
+        cands.append(os.path.expanduser(env))
+    cands.append(os.path.join(APP_DIR, "config.json"))
+    cands.append(os.path.expanduser("~/.clarity/claude-usage.json"))  # legacy Clarity build
+    return cands
+
+
+def config_path():
+    for p in config_candidates():
+        if os.path.exists(p):
+            return p
+    return os.path.join(APP_DIR, "config.json")
+
+
+def load_config():
+    for p in config_candidates():
+        if os.path.exists(p):
+            try:
+                with open(p) as fh:
+                    cfg = json.load(fh)
+                if isinstance(cfg, dict) and isinstance(cfg.get("accounts"), list) and cfg["accounts"]:
+                    return cfg
+            except Exception:
+                pass  # try the next candidate; the dropdown notes problems
+    return default_config()
+
+
+# ------------------------------------------------------------------------ credentials
+
+def _token_from_blob(blob):
+    """Given the raw JSON string Claude Code stores, return (token, expires_at_ms)."""
+    data = json.loads(blob)
+    oauth = data.get("claudeAiOauth") or data.get("claude_ai_oauth") or data
+    token = oauth.get("accessToken") or oauth.get("access_token")
+    exp = oauth.get("expiresAt") or oauth.get("expires_at")
+    return token, exp
+
+
+def get_token(acct):
+    """Resolve an account's bearer token from the first source that works.
+    Returns (token, expires_at_ms, source_label) or (None, None, why-it-failed)."""
+    # 1) Explicit shell command that prints a bare token (max flexibility).
+    cmd = acct.get("token_cmd")
+    if cmd:
+        try:
+            out = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=8)
+            tok = out.stdout.strip()
+            if tok:
+                return tok, None, "token_cmd"
+        except Exception:
+            pass
+
+    # 2) A literal token in the config (discouraged, but allowed).
+    if acct.get("token"):
+        return acct["token"], None, "config"
+
+    # 3) A credentials file (Linux/WSL, or a second account under its own config dir).
+    cf = acct.get("credentials_file")
+    if cf:
+        cf = os.path.expanduser(cf)
+        if os.path.exists(cf):
+            try:
+                with open(cf) as fh:
+                    tok, exp = _token_from_blob(fh.read())
+                if tok:
+                    return tok, exp, "file"
+            except Exception:
+                return None, None, "unreadable credentials file"
+
+    # 4) macOS Keychain (the default Claude Code storage on a Mac).
+    svc = acct.get("keychain_service")
+    if svc and sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password", "-s", svc, "-w"],
+                capture_output=True, text=True, timeout=8,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                tok, exp = _token_from_blob(out.stdout.strip())
+                if tok:
+                    return tok, exp, "keychain"
+        except Exception:
+            pass
+
+    return None, None, "not logged in"
+
+
+# ------------------------------------------------------------------------------ fetch
+
+def fetch_usage(token):
+    req = urllib.request.Request(
+        USAGE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+            "User-Agent": UA,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def cache_path(label):
+    return os.path.join(CACHE_DIR, f"{_slug(label)}.json")
+
+
+def _slug(s):
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s)).lower() or "acct"
+
+
+def usage_for(acct):
+    """Return dict: {ok, data, stale, age, error, source}. Uses a 180s cache to
+    stay well under the endpoint's rate limit and to survive transient failures."""
+    label = acct.get("label", "account")
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cp = cache_path(label)
+
+    cached = None
+    if os.path.exists(cp):
+        try:
+            with open(cp) as fh:
+                cached = json.load(fh)
+        except Exception:
+            cached = None
+
+    # Serve a fresh-enough cache without touching the network.
+    now = time.time()
+    if cached and (now - cached.get("fetched_at", 0)) < CACHE_TTL:
+        return {"ok": True, "data": cached["data"], "stale": False,
+                "age": now - cached["fetched_at"], "error": None, "source": cached.get("source")}
+
+    token, exp, source = get_token(acct)
+    if not token:
+        return _fallback(cached, now, error=source)
+
+    if exp and _to_ms(exp) < now * 1000:
+        return _fallback(cached, now, error="token expired — run `claude` to refresh login")
+
+    try:
+        data = fetch_usage(token)
+        with open(cp, "w") as fh:
+            json.dump({"fetched_at": now, "data": data, "source": source}, fh)
+        return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return _fallback(cached, now, error="401 — login invalid/expired, run `claude`")
+        if e.code == 429:
+            return _fallback(cached, now, error="429 — rate limited, showing cache")
+        return _fallback(cached, now, error=f"HTTP {e.code}")
+    except Exception as e:
+        return _fallback(cached, now, error=f"{type(e).__name__}")
+
+
+def _fallback(cached, now, error):
+    if cached and "data" in cached:
+        return {"ok": True, "data": cached["data"], "stale": True,
+                "age": now - cached.get("fetched_at", now), "error": error,
+                "source": cached.get("source")}
+    return {"ok": False, "data": None, "stale": False, "age": None, "error": error, "source": None}
+
+
+def _to_ms(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0
+    return v if v > 1e12 else v * 1000  # accept seconds or milliseconds
+
+
+# --------------------------------------------------------------------------- rendering
+
+def sev(pct):
+    if pct is None:
+        return "dim"
+    if pct >= RED_AT:
+        return "red"
+    if pct >= AMBER_AT:
+        return "amber"
+    return "green"
+
+
+def bar(pct, cells=10):
+    if pct is None:
+        return "─" * cells
+    filled = max(0, min(cells, round(pct / 100 * cells)))
+    return "█" * filled + "░" * (cells - filled)
+
+
+def color_param(name):
+    lo, hi = COLORS[name]
+    return f"{lo},{hi}"
+
+
+def fmt_pct(pct):
+    return "—" if pct is None else f"{round(pct)}%"
+
+
+def fmt_reset(iso):
+    """Human 'resets in 2h13m' for near windows, or a short date for far ones."""
+    if not iso:
+        return ""
+    try:
+        t = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    delta = (t - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return "resetting now"
+    mins = int(delta // 60)
+    if mins < 60:
+        return f"resets in {mins}m"
+    hrs, m = divmod(mins, 60)
+    if hrs < 48:
+        return f"resets in {hrs}h{m:02d}m"
+    days, h = divmod(hrs, 24)
+    return f"resets in {days}d{h}h"
+
+
+def util(obj):
+    """Pull a numeric utilization out of a {utilization, resets_at} object."""
+    if not isinstance(obj, dict):
+        return None, None
+    u = obj.get("utilization")
+    try:
+        u = float(u)
+    except (TypeError, ValueError):
+        u = None
+    return u, obj.get("resets_at")
+
+
+def account_lines(acct, res):
+    """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct)."""
+    label = acct.get("label", "account")
+    lines = []
+    worst = None
+
+    if not res["ok"]:
+        lines.append(f"{label} — {res['error'] or 'not logged in'} "
+                     f"| sfimage=circle.dashed sfcolor={sf('dim')} color={color_param('dim')} "
+                     f"font=Menlo-Bold size=13 trim=false")
+        lines.append(f"-- Not logged into this account, or credentials unreachable. "
+                     f"See 'About / setup'. | color={color_param('dim')} size=12")
+        return lines, worst
+
+    data = res["data"] or {}
+    five_u, five_r = util(data.get("five_hour"))
+    week_u, week_r = util(data.get("seven_day"))
+    worst = max([p for p in (five_u, week_u) if p is not None], default=None)
+
+    head = label + ("  (cached)" if res["stale"] else "")
+    lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
+                 f"font=Menlo-Bold size=13 trim=false")
+
+    def row(name, pct, reset):
+        c = color_param(sev(pct))
+        text = f"  {name:<7} [{bar(pct)}] {fmt_pct(pct):>4}"
+        r = fmt_reset(reset)
+        if r:
+            text += f"   {r}"
+        lines.append(f"{text} | font=Menlo size=13 trim=false color={c}")
+
+    row("5-hour", five_u, five_r)
+    row("weekly", week_u, week_r)
+
+    # Per-model weekly limits (Max plans often meter Opus separately).
+    for key, name in (("seven_day_opus", "· Opus"), ("seven_day_sonnet", "· Sonnet")):
+        mu, mr = util(data.get(key))
+        if mu is not None:
+            row("  " + name, mu, mr)
+
+    extra = data.get("extra_usage") or {}
+    if extra.get("is_enabled"):
+        used = extra.get("used_credits")
+        limit = extra.get("monthly_limit")
+        if used is not None and limit:
+            lines.append(f"  extra usage: {used}/{limit} credits this month "
+                         f"| font=Menlo size=12 trim=false color={color_param('dim')}")
+
+    if res["error"]:
+        lines.append(f"  ⚠︎ {res['error']} | size=12 color={color_param('amber')} trim=false")
+
+    return lines, worst
+
+
+def main():
+    cfg = load_config()
+    accounts = cfg.get("accounts", [])
+
+    results = []
+    for acct in accounts:
+        results.append((acct, usage_for(acct)))
+
+    # ---- menu bar title: only accounts that returned data; a gauge tinted by the worst window ----
+    shown = []          # (initial, worst_pct) for accounts with real numbers
+    all_worst = []
+    for acct, res in results:
+        _, w = account_lines(acct, res)  # cheap; recomputed below for the dropdown too
+        if res["ok"] and w is not None:
+            label = acct.get("label", "?")
+            shown.append((label[0].upper() if label else "?", round(w)))
+            all_worst.append(w)
+
+    worst_sev = sev(max(all_worst, default=None))
+    if not shown:
+        # nothing logged in yet — stay quiet and subtle
+        print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+    else:
+        text = f"{shown[0][1]}%" if len(shown) == 1 else " · ".join(f"{i} {p}%" for i, p in shown)
+        # white Claude logo (template image) + white numbers (native color), 20% smaller
+        print(f"{text} | templateImage={CLAUDE_ICON} size=11")
+
+    print("---")
+    print(f"Claude plan usage  ·  updated {datetime.now().strftime('%H:%M')} "
+          f"| size=12 color={color_param('dim')}")
+    print("---")
+
+    for acct, res in results:
+        lines, _ = account_lines(acct, res)
+        for ln in lines:
+            print(ln)
+        print("---")
+
+    # ---- actions ----
+    print("Refresh now | refresh=true")
+    print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
+          f"param2={CACHE_DIR} terminal=false refresh=true")
+    print("About / setup")
+    print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
+    print("-- percentages `/usage` shows, not API dollar cost.")
+    print("-- Source: api.anthropic.com/api/oauth/usage (your Claude Code login).")
+    print("-- Numbers are cached ~3 min to respect the rate limit.")
+    print(f"-- Config: {config_path()}")
+    print("-- | size=12")
+    print(f"-- Edit config file | bash=/usr/bin/open param1=-t param2={config_path()} terminal=false")
+    print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        print("⚠︎ Claude usage | color=#cf222e,#ff7b72")
+        print("---")
+        print("The widget hit an error:")
+        for line in traceback.format_exc().splitlines():
+            print(f"{line} | font=Menlo size=11 trim=false")
