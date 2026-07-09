@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <xbar.title>Claude Plan Usage</xbar.title>
-# <xbar.version>1.1.1</xbar.version>
+# <xbar.version>1.2.0</xbar.version>
 # <xbar.author>billjoel25</xbar.author>
 # <xbar.author.github>billjoel25</xbar.author.github>
 # <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the rolling 5-hour window and the weekly limit, for one or more accounts. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
@@ -142,6 +142,7 @@ def _ensure_config():
                 "_comment": "Optional — only for the advanced CLI/Keychain path. Accounts you "
                             "'Sign in with Claude' from the menu don't need this file. Move an "
                             "entry from _example into accounts to use it.",
+                "menu_bar": "five_hour",
                 "accounts": [],
                 "_example": [
                     {"label": "work",
@@ -151,6 +152,48 @@ def _ensure_config():
             }, fh, indent=2)
     except Exception:
         pass  # non-fatal; the widget still works without a config file
+
+
+# Which window the menu-bar number shows. 'auto' = the worst of all windows
+# (including per-model caps); the dropdown always lists every window regardless.
+DISPLAY_MODES = ("five_hour", "weekly", "both", "auto")
+DISPLAY_DEFAULT = "five_hour"
+
+
+def display_mode():
+    """The user's menu-bar window choice — `menu_bar` in the config file."""
+    p = config_path()
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                v = json.load(fh).get("menu_bar")
+            if v in DISPLAY_MODES:
+                return v
+        except Exception:
+            pass
+    return DISPLAY_DEFAULT
+
+
+def do_set_display():
+    """Handle 'set-display <mode>' from the dropdown: persist the choice in the config."""
+    value = sys.argv[2] if len(sys.argv) > 2 else ""
+    if value not in DISPLAY_MODES:
+        raise SystemExit(f"usage: set-display [{'|'.join(DISPLAY_MODES)}]")
+    p = config_path()
+    cfg = {}
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                loaded = json.load(fh)
+            if not isinstance(loaded, dict):
+                return  # unexpected shape — don't clobber it for a display tweak
+            cfg = loaded
+        except Exception:
+            return      # unreadable — likewise leave the file alone
+    cfg["menu_bar"] = value
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
 
 
 # ------------------------------------------------------------------------ credentials
@@ -368,6 +411,28 @@ def util(obj):
     except (TypeError, ValueError):
         u = None
     return u, obj.get("resets_at")
+
+
+def _title_pct(data, worst, mode):
+    """Menu-bar text for one account under the chosen display mode. Falls back to the
+    worst window when the chosen one has no data; a ⚠ flags a window the user isn't
+    showing (weekly, Opus, …) that is already in the red."""
+    data = data if isinstance(data, dict) else {}
+    five = util(data.get("five_hour"))[0]
+    week = util(data.get("seven_day"))[0]
+    if mode == "five_hour" and five is not None:
+        text, visible = f"{round(five)}%", five
+    elif mode == "weekly" and week is not None:
+        text, visible = f"{round(week)}%", week
+    elif mode == "both" and (five is not None or week is not None):
+        f_txt = "–" if five is None else str(round(five))
+        w_txt = "–" if week is None else str(round(week))
+        text, visible = f"{f_txt}/{w_txt}%", max(v for v in (five, week) if v is not None)
+    else:
+        text, visible = f"{round(worst)}%", worst   # 'auto', or fallback
+    if worst >= RED_AT and visible < RED_AT:
+        text += "⚠"
+    return text
 
 
 def account_lines(acct, res):
@@ -667,6 +732,13 @@ def _footer():
     print("Refresh now | refresh=true")
     print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
           f'param2="{CACHE_DIR}" terminal=false refresh=true')
+    mode = display_mode()
+    print("Menu bar shows")
+    for key, name in (("five_hour", "5-hour window"), ("weekly", "weekly window"),
+                      ("both", "5-hour / weekly"), ("auto", "worst window")):
+        mark = "✓ " if key == mode else "   "
+        print(f'-- {mark}{name} | bash="{plugin}" param1=set-display param2={key} '
+              f"terminal=false refresh=true trim=false")
     print("About / setup")
     print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
     print("-- percentages `/usage` shows, not API dollar cost.")
@@ -709,18 +781,21 @@ def main():
         _welcome()
         return
 
-    # ---- menu bar title: only accounts that returned real numbers ----
-    shown = []          # (initial, worst_pct)
+    # ---- menu bar title: only accounts that returned real numbers, showing the
+    # ---- window the user picked under "Menu bar shows" (default: 5-hour) ----
+    mode = display_mode()
+    shown = []          # (initial, text like "42%" or "42/90%⚠")
     for acct, res, _, worst in rendered:
         if res["ok"] and worst is not None:
             label = acct.get("label", "?")
-            shown.append((label[0].upper() if label else "?", round(worst)))
+            shown.append((label[0].upper() if label else "?",
+                          _title_pct(res["data"], worst, mode)))
 
     if not shown:
         # configured, but nothing readable yet — stay quiet and subtle
         print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
     else:
-        text = f"{shown[0][1]}%" if len(shown) == 1 else " · ".join(f"{i} {p}%" for i, p in shown)
+        text = shown[0][1] if len(shown) == 1 else " · ".join(f"{i} {p}" for i, p in shown)
         # white Claude logo (template image) + white numbers (native color), 20% smaller
         print(f"{text} | templateImage={CLAUDE_ICON} size=11")
 
@@ -740,6 +815,9 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "set-display":
+        do_set_display()
         raise SystemExit(0)
     try:
         main()

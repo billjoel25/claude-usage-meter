@@ -1,6 +1,8 @@
 {
   "_comment": "Optional. Copy to ~/.config/claude-usage-meter/config.json. You do NOT need this file if you 'Sign in with Claude' from the menu — it's only for the advanced CLI/Keychain path. To use it, move an entry from _example into accounts.",
   "_how": "Each account needs a way to reach its OAuth token. On macOS the default Claude Code login lives in the Keychain (service 'Claude Code-credentials'). A second account logged in under its own CLAUDE_CONFIG_DIR gets its own hashed Keychain entry — see the README to find its service name.",
+  "_menu_bar": "Which window the menu-bar number shows: five_hour (default), weekly, both, or auto (worst of all windows). Also settable from the dropdown under 'Menu bar shows'.",
+  "menu_bar": "five_hour",
   "accounts": [],
   "_example": [
     {

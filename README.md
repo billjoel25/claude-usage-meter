@@ -20,6 +20,9 @@ work
 ```
 
 - **Sign in with Claude** — one click, browser login, no CLI. Add several accounts.
+- **Pick your number** — the menu bar shows the **5-hour window** by default; switch
+  it to weekly, both (`42/90%`), or the worst window via dropdown → **Menu bar shows**.
+  A `⚠` appears whenever a window you're *not* showing (weekly, Opus…) is in the red.
 - **Pure Python 3** — no pip installs, no build step.
 - **Private** — your token is stored locally and sent only to `api.anthropic.com`
   over HTTPS. Nothing goes to any third party.
@@ -120,7 +123,10 @@ each account tries its token sources in order:
 
 ## Tuning
 
-Edit the constants near the top of `claude-usage.5m.py`:
+The menu-bar number is chosen from the dropdown (**Menu bar shows** → 5-hour /
+weekly / both / worst), stored as `"menu_bar"` in the config file.
+
+For the rest, edit the constants near the top of `claude-usage.5m.py`:
 
 - `AMBER_AT` / `RED_AT` — the % thresholds for yellow/red.
 - `CACHE_TTL` — cache lifetime in seconds (keep ≥ 180 to avoid 429s).
