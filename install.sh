@@ -27,8 +27,11 @@ if [ -z "$DEST" ]; then
   echo "  (In SwiftBar, set this same folder under Preferences → Plugin Folder.)"
 fi
 
-mkdir -p "$DEST"
-cp "$SRC" "$DEST/$PLUGIN"
+if ! mkdir -p "$DEST" || ! cp "$SRC" "$DEST/$PLUGIN"; then
+  echo "✗ Couldn't install the plugin into: $DEST" >&2
+  echo "  Check the folder exists and is writable, then re-run." >&2
+  exit 1
+fi
 chmod +x "$DEST/$PLUGIN"
 echo "✓ Installed widget → $DEST/$PLUGIN"
 

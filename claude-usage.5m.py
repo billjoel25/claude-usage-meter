@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # <xbar.title>Claude Plan Usage</xbar.title>
-# <xbar.version>1.1.0</xbar.version>
+# <xbar.version>1.2.0</xbar.version>
 # <xbar.author>billjoel25</xbar.author>
 # <xbar.author.github>billjoel25</xbar.author.github>
 # <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the rolling 5-hour window and the weekly limit, for one or more accounts. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
@@ -128,6 +128,74 @@ def load_config():
     return default_config()
 
 
+def _ensure_config():
+    """Create a documented, empty starter config the first time so 'Edit config file'
+    always opens something real. Empty `accounts` keeps the onboarding + auto-detect
+    paths intact — signed-in accounts and CLI logins are found without this file."""
+    if any(os.path.exists(c) for c in config_candidates()):
+        return
+    p = os.path.join(APP_DIR, "config.json")
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(p, "w") as fh:
+            json.dump({
+                "_comment": "Optional — only for the advanced CLI/Keychain path. Accounts you "
+                            "'Sign in with Claude' from the menu don't need this file. Move an "
+                            "entry from _example into accounts to use it.",
+                "menu_bar": "five_hour",
+                "accounts": [],
+                "_example": [
+                    {"label": "work",
+                     "keychain_service": "Claude Code-credentials-XXXXXXXX",
+                     "credentials_file": "~/.claude-work/.credentials.json"},
+                ],
+            }, fh, indent=2)
+    except Exception:
+        pass  # non-fatal; the widget still works without a config file
+
+
+# Which window the menu-bar number shows. 'auto' = the worst of all windows
+# (including per-model caps); the dropdown always lists every window regardless.
+DISPLAY_MODES = ("five_hour", "weekly", "both", "auto")
+DISPLAY_DEFAULT = "five_hour"
+
+
+def display_mode():
+    """The user's menu-bar window choice — `menu_bar` in the config file."""
+    p = config_path()
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                v = json.load(fh).get("menu_bar")
+            if v in DISPLAY_MODES:
+                return v
+        except Exception:
+            pass
+    return DISPLAY_DEFAULT
+
+
+def do_set_display():
+    """Handle 'set-display <mode>' from the dropdown: persist the choice in the config."""
+    value = sys.argv[2] if len(sys.argv) > 2 else ""
+    if value not in DISPLAY_MODES:
+        raise SystemExit(f"usage: set-display [{'|'.join(DISPLAY_MODES)}]")
+    p = config_path()
+    cfg = {}
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                loaded = json.load(fh)
+            if not isinstance(loaded, dict):
+                return  # unexpected shape — don't clobber it for a display tweak
+            cfg = loaded
+        except Exception:
+            return      # unreadable — likewise leave the file alone
+    cfg["menu_bar"] = value
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+
+
 # ------------------------------------------------------------------------ credentials
 
 def _token_from_blob(blob):
@@ -242,8 +310,14 @@ def usage_for(acct):
     if not token:
         return _fallback(cached, now, error=source)
 
+    # Signed-in (OAuth) accounts are refreshed in-app; a stale one means "re-add",
+    # not "run claude" (which only applies to an auto-detected Claude Code login).
+    is_oauth = acct.get("kind") == "oauth" or bool(acct.get("refresh_token"))
+
     if exp and _to_ms(exp) < now * 1000:
-        return _fallback(cached, now, error="token expired — run `claude` to refresh login")
+        return _fallback(cached, now, error=(
+            "sign-in expired — sign out and re-add" if is_oauth
+            else "token expired — run `claude` to refresh login"))
 
     try:
         data = fetch_usage(token)
@@ -252,7 +326,9 @@ def usage_for(acct):
         return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return _fallback(cached, now, error="401 — login invalid/expired, run `claude`")
+            return _fallback(cached, now, error=(
+                "401 — sign-in invalid, re-add the account" if is_oauth
+                else "401 — login invalid/expired, run `claude`"))
         if e.code == 429:
             return _fallback(cached, now, error="429 — rate limited, showing cache")
         return _fallback(cached, now, error=f"HTTP {e.code}")
@@ -337,6 +413,28 @@ def util(obj):
     return u, obj.get("resets_at")
 
 
+def _title_pct(data, worst, mode):
+    """Menu-bar text for one account under the chosen display mode. Falls back to the
+    worst window when the chosen one has no data; a ⚠ flags a window the user isn't
+    showing (weekly, Opus, …) that is already in the red."""
+    data = data if isinstance(data, dict) else {}
+    five = util(data.get("five_hour"))[0]
+    week = util(data.get("seven_day"))[0]
+    if mode == "five_hour" and five is not None:
+        text, visible = f"{round(five)}%", five
+    elif mode == "weekly" and week is not None:
+        text, visible = f"{round(week)}%", week
+    elif mode == "both" and (five is not None or week is not None):
+        f_txt = "–" if five is None else str(round(five))
+        w_txt = "–" if week is None else str(round(week))
+        text, visible = f"{f_txt}/{w_txt}%", max(v for v in (five, week) if v is not None)
+    else:
+        text, visible = f"{round(worst)}%", worst   # 'auto', or fallback
+    if worst >= RED_AT and visible < RED_AT:
+        text += "⚠"
+    return text
+
+
 def account_lines(acct, res):
     """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct)."""
     label = acct.get("label", "account")
@@ -351,10 +449,14 @@ def account_lines(acct, res):
                      f"See 'About / setup'. | color={color_param('dim')} size=12")
         return lines, worst
 
-    data = res["data"] or {}
+    data = res["data"] if isinstance(res["data"], dict) else {}
     five_u, five_r = util(data.get("five_hour"))
     week_u, week_r = util(data.get("seven_day"))
-    worst = max([p for p in (five_u, week_u) if p is not None], default=None)
+    # Per-model weekly caps (Max plans meter Opus/Sonnet separately) count toward the
+    # summary too — they're often the first limit you actually hit. Leaving them out
+    # let the menu bar read "amber" while Opus was already maxed.
+    model_u = [util(data.get(k))[0] for k in ("seven_day_opus", "seven_day_sonnet")]
+    worst = max([p for p in (five_u, week_u, *model_u) if p is not None], default=None)
 
     head = label + ("  (cached)" if res["stale"] else "")
     lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
@@ -389,7 +491,7 @@ def account_lines(acct, res):
         lines.append(f"  ⚠︎ {res['error']} | size=12 color={color_param('amber')} trim=false")
 
     if acct.get("kind") == "oauth" or acct.get("refresh_token"):
-        lines.append(f"  ↳ sign out | bash=/bin/rm param1=-f param2={account_file(label)} "
+        lines.append(f'  ↳ sign out | bash=/bin/rm param1=-f param2="{account_file(label)}" '
                      f"terminal=false refresh=true color={color_param('dim')} size=11 trim=false")
 
     return lines, worst
@@ -525,6 +627,38 @@ def load_accounts():
     return (app + manual) or default_config()["accounts"]
 
 
+def _existing_account_email(label):
+    """Email stored in the account file for `label`: '' if none stored / unreadable,
+    or None if there is no such file yet."""
+    p = account_file(label)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as fh:
+            return json.load(fh).get("email") or ""
+    except Exception:
+        return ""
+
+
+def _unique_label(label, email):
+    """Keep a sign-in from silently clobbering a *different* account that slugs to the
+    same filename (e.g. alice@gmail.com and alice@work.com both default to 'alice', or
+    two email-less logins both default to 'claude'). Re-authenticating the same email
+    keeps its label; a genuine collision gets a numeric suffix."""
+    existing = _existing_account_email(label)
+    if existing is None:
+        return label                      # no file yet — free to use
+    if email and existing == email:
+        return label                      # same account refreshing in place
+    n = 2
+    while True:
+        cand = f"{label}-{n}"
+        ex = _existing_account_email(cand)
+        if ex is None or (email and ex == email):
+            return cand
+        n += 1
+
+
 def do_signin():
     """Interactive 'Sign in with Claude' — launched in a Terminal from the menu."""
     label_arg = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -579,6 +713,11 @@ def do_signin():
         label = input(f"\n  Name this account [{default_label}]: ").strip() or default_label
     except (EOFError, KeyboardInterrupt):
         label = default_label
+    safe = _unique_label(label, email)
+    if safe != label:
+        print(f"\n  ⚠︎ An account named “{label}” already exists — saving this one as “{safe}”")
+        print("     so it won't overwrite the other. Rename it later from the config file.")
+        label = safe
     _store_tokens(label, tok, email=email)
     who = email or label
     print(f"\n  ✓ Signed in as {who}.")
@@ -592,7 +731,14 @@ def _footer():
     print(f'➕ Add Claude account… | bash="{plugin}" param1=signin terminal=true')
     print("Refresh now | refresh=true")
     print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
-          f"param2={CACHE_DIR} terminal=false refresh=true")
+          f'param2="{CACHE_DIR}" terminal=false refresh=true')
+    mode = display_mode()
+    print("Menu bar shows")
+    for key, name in (("five_hour", "5-hour window"), ("weekly", "weekly window"),
+                      ("both", "5-hour / weekly"), ("auto", "worst window")):
+        mark = "✓ " if key == mode else "   "
+        print(f'-- {mark}{name} | bash="{plugin}" param1=set-display param2={key} '
+              f"terminal=false refresh=true trim=false")
     print("About / setup")
     print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
     print("-- percentages `/usage` shows, not API dollar cost.")
@@ -601,45 +747,55 @@ def _footer():
     print("-- Numbers are cached ~3 min to respect the rate limit.")
     print(f"-- Config: {config_path()}")
     print("-- | size=12")
-    print(f"-- Edit config file | bash=/usr/bin/open param1=-t param2={config_path()} terminal=false")
+    print(f'-- Edit config file | bash=/usr/bin/open param1=-t param2="{config_path()}" terminal=false')
     print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
 
 
-def main():
-    accounts = load_accounts()
+def _welcome():
+    print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+    print("---")
+    print(f"Claude plan usage | size=12 color={color_param('dim')}")
+    print("---")
+    print("Not signed in yet | font=Menlo-Bold size=13 trim=false")
+    print(f"Add your Claude account below to see your 5-hour & weekly limits. "
+          f"| color={color_param('dim')} size=12 trim=false")
+    print("---")
+    _footer()
 
-    if not (_app_accounts() or _manual_accounts()):
-        print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
-        print("---")
-        print(f"Claude plan usage | size=12 color={color_param('dim')}")
-        print("---")
-        print("Not signed in yet | font=Menlo-Bold size=13 trim=false")
-        print(f"Add your Claude account below to see your 5-hour & weekly limits. "
-              f"| color={color_param('dim')} size=12 trim=false")
-        print("---")
-        _footer()
+
+def main():
+    _ensure_config()
+    accounts = load_accounts()
+    rendered = []           # (acct, res, lines, worst) — computed once per account
+    for acct in accounts:
+        res = usage_for(acct)
+        lines, worst = account_lines(acct, res)
+        rendered.append((acct, res, lines, worst))
+
+    # Onboard only when there's genuinely nothing to show: no signed-in account, no
+    # hand-written config, and no auto-detected Claude Code login returning data. This
+    # keeps the friendly welcome for fresh installs while still auto-detecting a CLI login.
+    have_data = any(res["ok"] and res["data"] for _, res, _, _ in rendered)
+    explicit = bool(_app_accounts()) or bool(_manual_accounts())
+    if not have_data and not explicit:
+        _welcome()
         return
 
-    results = []
-    for acct in accounts:
-        results.append((acct, usage_for(acct)))
-
-    # ---- menu bar title: only accounts that returned data; a gauge tinted by the worst window ----
-    shown = []          # (initial, worst_pct) for accounts with real numbers
-    all_worst = []
-    for acct, res in results:
-        _, w = account_lines(acct, res)  # cheap; recomputed below for the dropdown too
-        if res["ok"] and w is not None:
+    # ---- menu bar title: only accounts that returned real numbers, showing the
+    # ---- window the user picked under "Menu bar shows" (default: 5-hour) ----
+    mode = display_mode()
+    shown = []          # (initial, text like "42%" or "42/90%⚠")
+    for acct, res, _, worst in rendered:
+        if res["ok"] and worst is not None:
             label = acct.get("label", "?")
-            shown.append((label[0].upper() if label else "?", round(w)))
-            all_worst.append(w)
+            shown.append((label[0].upper() if label else "?",
+                          _title_pct(res["data"], worst, mode)))
 
-    worst_sev = sev(max(all_worst, default=None))
     if not shown:
-        # nothing logged in yet — stay quiet and subtle
+        # configured, but nothing readable yet — stay quiet and subtle
         print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
     else:
-        text = f"{shown[0][1]}%" if len(shown) == 1 else " · ".join(f"{i} {p}%" for i, p in shown)
+        text = shown[0][1] if len(shown) == 1 else " · ".join(f"{i} {p}" for i, p in shown)
         # white Claude logo (template image) + white numbers (native color), 20% smaller
         print(f"{text} | templateImage={CLAUDE_ICON} size=11")
 
@@ -648,8 +804,7 @@ def main():
           f"| size=12 color={color_param('dim')}")
     print("---")
 
-    for acct, res in results:
-        lines, _ = account_lines(acct, res)
+    for acct, res, lines, worst in rendered:
         for ln in lines:
             print(ln)
         print("---")
@@ -660,6 +815,9 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "set-display":
+        do_set_display()
         raise SystemExit(0)
     try:
         main()
