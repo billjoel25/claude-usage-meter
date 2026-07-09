@@ -1,7 +1,8 @@
 {
-  "_comment": "Copy to ~/.config/claude-usage-meter/config.json. One entry per Claude account.",
+  "_comment": "Optional. Copy to ~/.config/claude-usage-meter/config.json. You do NOT need this file if you 'Sign in with Claude' from the menu — it's only for the advanced CLI/Keychain path. To use it, move an entry from _example into accounts.",
   "_how": "Each account needs a way to reach its OAuth token. On macOS the default Claude Code login lives in the Keychain (service 'Claude Code-credentials'). A second account logged in under its own CLAUDE_CONFIG_DIR gets its own hashed Keychain entry — see the README to find its service name.",
-  "accounts": [
+  "accounts": [],
+  "_example": [
     {
       "label": "personal",
       "keychain_service": "Claude Code-credentials",
