@@ -1,5 +1,10 @@
 # Claude Plan Usage
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/billjoel25/claude-usage-meter?sort=semver)](https://github.com/billjoel25/claude-usage-meter/releases)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+[![CI](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml)
+
 A tiny macOS **menu-bar** widget that shows how much of your **Claude plan** you've
 used — the rolling **5-hour** window and the **weekly** limit — at a glance, for one
 or more accounts.
@@ -8,7 +13,7 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳ P 96% · L 80%          ← menu bar (P/L = per-account initials)
+✳ 96%⚠  · L 80%          ← menu bar (shows the 5-hour window by default)
 ────────────────────────
 personal
   5-hour  [█████████░] 96%  resets in 47m
@@ -32,14 +37,39 @@ work
 
 ## Install
 
-Requires [SwiftBar](https://github.com/swiftbar/SwiftBar) (or xbar).
+You need [SwiftBar](https://github.com/swiftbar/SwiftBar) (or xbar):
+
+```bash
+brew install --cask swiftbar
+```
+
+**One line** (inspect the [script](install.sh) first if you like):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/billjoel25/claude-usage-meter/main/install.sh | bash
+```
+
+<details>
+<summary>Or from a clone</summary>
 
 ```bash
 git clone https://github.com/billjoel25/claude-usage-meter.git
 cd claude-usage-meter
 bash install.sh
-brew install --cask swiftbar   # if you don't have it
 ```
+</details>
+
+<details>
+<summary>Or via Homebrew (optional)</summary>
+
+```bash
+brew tap billjoel25/claude-usage-meter https://github.com/billjoel25/claude-usage-meter
+brew install billjoel25/claude-usage-meter/claude-usage-meter
+```
+
+Homebrew can't drop the plugin into your SwiftBar folder, so it prints a one-line
+`ln -sf …` symlink command to finish — the `curl` installer above is simpler.
+</details>
 
 Open SwiftBar and set its **Plugin Folder** to the path the installer prints. The
 widget appears within a few seconds.
@@ -61,6 +91,13 @@ Your access + refresh tokens are stored locally under
 automatically. On first read, macOS may ask to let SwiftBar use the Keychain — click
 **Always Allow**.
 
+## Uninstall
+
+```bash
+bash uninstall.sh          # remove the plugin + cache (keeps your login)
+bash uninstall.sh --all    # also remove config + stored account tokens
+```
+
 ## How it works
 
 It reads Anthropic's usage endpoint (`GET https://api.anthropic.com/api/oauth/usage`)
@@ -73,7 +110,7 @@ The refresh cadence is the `.5m.` in the filename (every 5 min); results are cac
 > ⚠️ `/api/oauth/usage` and the sign-in flow use **unofficial** Anthropic endpoints
 > (the same ones Claude Code uses). They're read-only and widely used by community
 > tools, but Anthropic could change them. If numbers or sign-in break, that's the
-> first thing to check.
+> first thing to check. See [SECURITY.md](SECURITY.md).
 
 ## Advanced: use an existing Claude Code login instead
 
@@ -106,6 +143,7 @@ each account tries its token sources in order:
 
 ```json
 {
+  "menu_bar": "five_hour",
   "accounts": [
     { "label": "personal", "keychain_service": "Claude Code-credentials",
       "credentials_file": "~/.claude/.credentials.json" },
@@ -140,6 +178,12 @@ For the rest, edit the constants near the top of `claude-usage.5m.py`:
 - **Widget missing from the menu bar** — it's usually hidden behind the notch on a
   full menu bar. Free up space, or use a menu-bar manager to reveal it.
 - **Numbers frozen** — dropdown → **Force refresh (clear cache)**.
+
+## Contributing
+
+Bug reports and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). It's a single
+pure-Python-3 file with a dependency-free test suite (`python3 tests/test_plugin.py`)
+and CI. Release/publishing steps live in [docs/PUBLISHING.md](docs/PUBLISHING.md).
 
 ## Prior art
 

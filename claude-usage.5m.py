@@ -821,7 +821,7 @@ if __name__ == "__main__":
         raise SystemExit(0)
     try:
         main()
-    except Exception as e:
+    except Exception:
         import traceback
         print("⚠︎ Claude usage | color=#cf222e,#ff7b72")
         print("---")
