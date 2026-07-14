@@ -8,13 +8,14 @@
 # this installs the script into the Homebrew prefix and the caveats below tell you
 # how to symlink it. For most people the curl one-liner in the README is simpler.
 #
-# Maintainers: bump `tag` and `revision` on each release (see docs/PUBLISHING.md).
+# Maintainers: on each release, bump `version`, the `url` tag, and `sha256`
+# (= shasum -a 256 claude-usage.5m.py at that tag). See docs/PUBLISHING.md.
 class ClaudeUsageMeter < Formula
   desc "macOS menu-bar widget for Claude Pro/Max/Team plan usage (SwiftBar/xbar plugin)"
   homepage "https://github.com/billjoel25/claude-usage-meter"
-  url "https://github.com/billjoel25/claude-usage-meter.git",
-      tag:      "v1.2.0",
-      revision: "REPLACE_WITH_TAG_COMMIT_SHA"
+  url "https://raw.githubusercontent.com/billjoel25/claude-usage-meter/v1.2.0/claude-usage.5m.py"
+  version "1.2.0"
+  sha256 "7d4f95ca56ae27c45877715a5b36fefdaf5e8b9659612aa848d240314061f79d"
   license "MIT"
   head "https://github.com/billjoel25/claude-usage-meter.git", branch: "main"
 
