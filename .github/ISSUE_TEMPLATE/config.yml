@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Setup & troubleshooting
+    url: https://github.com/billjoel25/claude-usage-meter#troubleshooting
+    about: Check the README troubleshooting section first.
+  - name: Report something sensitive
+    url: https://github.com/billjoel25/claude-usage-meter/security/advisories/new
+    about: For anything token/credential-related, use a private security advisory.

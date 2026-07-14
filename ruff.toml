@@ -1,0 +1,8 @@
+# Lint config so local runs and CI agree. Pyflakes + the pycodestyle error
+# subset ruff enables by default; line length is intentionally not enforced
+# (the SwiftBar output lines are long by nature).
+target-version = "py38"
+line-length = 120
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
