@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **The menu bar now shows only your current session** — the rolling 5-hour window.
+  A higher weekly or per-model (Opus/Sonnet) number no longer replaces it, and the
+  **⚠** cross-window marker is gone, so the number up top is always the one window.
+  The dropdown is unchanged: it still lists the weekly cap, per-model caps and
+  extra-usage credits, and each account's status dot still reflects the worst of
+  them, so a limit can't max out entirely unseen.
+- The dropdown's `5-hour` row is now labelled `session`, matching `/usage`.
+
+### Removed
+- The **Menu bar shows** selector (weekly / both / worst) and its `set-display`
+  action — with the menu bar fixed to the current session there is nothing to pick.
+  The `"menu_bar"` config key is no longer read; a leftover one is ignored, not
+  rewritten, and new starter configs omit it.
+
 ## [1.2.0] - 2026-07-14
 
 ### Added
