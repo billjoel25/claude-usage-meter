@@ -6,28 +6,38 @@
 [![CI](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml)
 
 A tiny macOS **menu-bar** widget that shows how much of your **Claude plan** you've
-used — the rolling **5-hour** window and the **weekly** limit — at a glance, for one
-or more accounts.
+used — your **current session** (the rolling 5-hour window) at a glance, with the
+weekly and per-model limits one click away — for one or more accounts.
 
 It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳ 96%⚠  · L 80%          ← menu bar (shows the 5-hour window by default)
+✳ P 96%  · W 40%         ← menu bar (always the current session)
 ────────────────────────
 personal
-  5-hour  [█████████░] 96%  resets in 47m
+  session [█████████░] 96%  resets in 47m
   weekly  [█████░░░░░] 54%  resets in 4d0h
     · Opus [█████████░] 91%  resets in 4d0h
 work
-  5-hour  [████░░░░░░] 40%  resets in 3h10m
+  session [████░░░░░░] 40%  resets in 3h10m
   weekly  [████████░░] 80%  resets in 4d0h
+────────────────────────
+Accounts
+  ✓ personal              ← click to hide it from the menu bar
+     ↓ move down
+  ✓ work
+     ↑ move up
 ```
 
 - **Sign in with Claude** — one click, browser login, no CLI. Add several accounts.
-- **Pick your number** — the menu bar shows the **5-hour window** by default; switch
-  it to weekly, both (`42/90%`), or the worst window via dropdown → **Menu bar shows**.
-  A `⚠` appears whenever a window you're *not* showing (weekly, Opus…) is in the red.
+- **Choose which accounts appear, and in what order** — dropdown → **Accounts**: click
+  one to show or hide its number in the menu bar, or move it up/down. A hidden account
+  keeps its full section in the dropdown, so you still see its numbers on a click.
+- **Current session only, up top** — the menu bar is always the rolling 5-hour
+  session percentage; a higher weekly or Opus number never takes its place. Open the
+  dropdown for the weekly cap, per-model caps, and extra-usage credits, where each
+  account's status dot still turns red if *any* of its windows is near the ceiling.
 - **Pure Python 3** — no pip installs, no build step.
 - **Private** — your token is stored locally and sent only to `api.anthropic.com`
   over HTTPS. Nothing goes to any third party.
@@ -143,11 +153,14 @@ each account tries its token sources in order:
 
 ```json
 {
-  "menu_bar": "five_hour",
   "accounts": [
     { "label": "personal", "keychain_service": "Claude Code-credentials",
       "credentials_file": "~/.claude/.credentials.json" },
     { "label": "work", "keychain_service": "Claude Code-credentials-XXXXXXXX" }
+  ],
+  "accounts_display": [
+    { "label": "work", "menu_bar": true },
+    { "label": "personal", "menu_bar": false }
   ]
 }
 ```
@@ -159,10 +172,19 @@ each account tries its token sources in order:
 | `credentials_file` | path to a Claude Code `.credentials.json`                        |
 | `keychain_service` | macOS Keychain generic-password service name                     |
 
+`accounts_display` is the dropdown → **Accounts** submenu written down: the list order
+is the display order (menu bar *and* dropdown sections), and `menu_bar: false` keeps an
+account out of the menu bar while leaving its section in the dropdown. It covers
+signed-in accounts too, not just the `accounts` above. Everything about it is optional —
+accounts it doesn't mention follow at the end and are shown, so without the key nothing
+changes. A bare `"work"` string works as an order-only entry, and a label that no longer
+matches an account is ignored.
+
 ## Tuning
 
-The menu-bar number is chosen from the dropdown (**Menu bar shows** → 5-hour /
-weekly / both / worst), stored as `"menu_bar"` in the config file.
+The menu-bar number is always the current session (the rolling 5-hour window) — there
+is nothing to configure. Earlier versions had a **Menu bar shows** selector backed by a
+`"menu_bar"` config key; both are gone, and a leftover `"menu_bar"` key is ignored.
 
 For the rest, edit the constants near the top of `claude-usage.5m.py`:
 

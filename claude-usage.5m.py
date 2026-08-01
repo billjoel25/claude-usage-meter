@@ -3,7 +3,7 @@
 # <xbar.version>1.2.0</xbar.version>
 # <xbar.author>billjoel25</xbar.author>
 # <xbar.author.github>billjoel25</xbar.author.github>
-# <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the rolling 5-hour window and the weekly limit, for one or more accounts. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
+# <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the current session (the rolling 5-hour window), for one or more accounts. The dropdown adds the weekly and per-model limits. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
 # <xbar.abouturl>https://github.com/billjoel25/claude-usage-meter</xbar.abouturl>
 # <swiftbar.hideAbout>false</swiftbar.hideAbout>
@@ -13,8 +13,9 @@
 #
 # Claude Plan Usage — a SwiftBar/xbar plugin. Pure Python 3, no pip installs.
 # It shows how much of your Claude *plan* you've used, not dollars:
-#   • 5-hour  = the rolling burst window
-#   • weekly  = the 7-day cap (Anthropic's "seven_day")
+#   • menu bar = the current session only — the rolling 5-hour window
+#   • dropdown = that session, plus the weekly 7-day cap (Anthropic's "seven_day"),
+#                any per-model weekly caps, and extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
 #
 # Sign in from the menu ("Add Claude account") — no Claude Code CLI needed.
@@ -142,7 +143,6 @@ def _ensure_config():
                 "_comment": "Optional — only for the advanced CLI/Keychain path. Accounts you "
                             "'Sign in with Claude' from the menu don't need this file. Move an "
                             "entry from _example into accounts to use it.",
-                "menu_bar": "five_hour",
                 "accounts": [],
                 "_example": [
                     {"label": "work",
@@ -154,46 +154,122 @@ def _ensure_config():
         pass  # non-fatal; the widget still works without a config file
 
 
-# Which window the menu-bar number shows. 'auto' = the worst of all windows
-# (including per-model caps); the dropdown always lists every window regardless.
-DISPLAY_MODES = ("five_hour", "weekly", "both", "auto")
-DISPLAY_DEFAULT = "five_hour"
+# --------------------------------------------------------------- display preferences
+# Which accounts contribute their number to the menu bar, and in what order. Stored
+# as `accounts_display` in the config file — an ordered list of
+#   {"label": "personal", "menu_bar": true}
+# (a bare "personal" string is accepted too, meaning "shown"). Accounts absent from
+# the list keep their discovery order at the end and are shown, so the key is purely
+# optional: without it nothing changes. Hiding an account only takes it out of the
+# menu bar — its section, numbers and reset times stay in the dropdown.
+DISPLAY_KEY = "accounts_display"
 
 
-def display_mode():
-    """The user's menu-bar window choice — `menu_bar` in the config file."""
+def _read_config():
+    """The config file as a dict — {} when it's absent, unreadable, or not an object."""
     p = config_path()
     if os.path.exists(p):
         try:
             with open(p) as fh:
-                v = json.load(fh).get("menu_bar")
-            if v in DISPLAY_MODES:
-                return v
+                cfg = json.load(fh)
+            if isinstance(cfg, dict):
+                return cfg
         except Exception:
             pass
-    return DISPLAY_DEFAULT
+    return {}
 
 
-def do_set_display():
-    """Handle 'set-display <mode>' from the dropdown: persist the choice in the config."""
-    value = sys.argv[2] if len(sys.argv) > 2 else ""
-    if value not in DISPLAY_MODES:
-        raise SystemExit(f"usage: set-display [{'|'.join(DISPLAY_MODES)}]")
+def _display_prefs():
+    """[(label, show_in_menu_bar)] from the config, skipping malformed entries."""
+    out = []
+    for e in _read_config().get(DISPLAY_KEY) or []:
+        if isinstance(e, str) and e:
+            out.append((e, True))
+        elif isinstance(e, dict) and e.get("label"):
+            out.append((str(e["label"]), e.get("menu_bar", True) is not False))
+    return out
+
+
+def order_accounts(accounts, prefs=None):
+    """`accounts` in display order: the ones named in `accounts_display` first, in
+    that order, then anything it doesn't mention in discovery order. Labels in the
+    config that no longer match an account are simply skipped."""
+    prefs = _display_prefs() if prefs is None else prefs
+    remaining = list(accounts)
+    ordered = []
+    for label, _ in prefs:
+        for i, a in enumerate(remaining):
+            if a.get("label") == label:
+                ordered.append(remaining.pop(i))
+                break
+    return ordered + remaining
+
+
+def hidden_labels(prefs=None):
+    """Labels switched off for the menu bar. Anything unlisted is shown."""
+    prefs = _display_prefs() if prefs is None else prefs
+    return {label for label, show in prefs if not show}
+
+
+def _config_for_write():
+    """The config dict to modify, or None when the file exists but must not be
+    touched (unreadable, or holding something other than an object)."""
     p = config_path()
-    cfg = {}
-    if os.path.exists(p):
-        try:
-            with open(p) as fh:
-                loaded = json.load(fh)
-            if not isinstance(loaded, dict):
-                return  # unexpected shape — don't clobber it for a display tweak
-            cfg = loaded
-        except Exception:
-            return      # unreadable — likewise leave the file alone
-    cfg["menu_bar"] = value
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as fh:
+            cfg = json.load(fh)
+    except Exception:
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _write_display(entries):
+    """Persist `entries` ([(label, show)]) as the display order, leaving every other
+    key in the file alone. A config we can't safely rewrite is left untouched."""
+    cfg = _config_for_write()
+    if cfg is None:
+        return
+    cfg[DISPLAY_KEY] = [{"label": label, "menu_bar": show} for label, show in entries]
+    p = config_path()
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
     with open(p, "w") as fh:
         json.dump(cfg, fh, indent=2)
+
+
+def _current_entries():
+    """Today's accounts as [(label, show)] in display order — the basis each menu
+    action edits, so the first click writes a complete, hand-editable list and
+    entries for accounts that are gone drop out."""
+    prefs = _display_prefs()
+    hidden = hidden_labels(prefs)
+    return [(a.get("label", "account"), a.get("label") not in hidden)
+            for a in order_accounts(load_accounts(), prefs)]
+
+
+def do_toggle_account():
+    """'toggle-account <label>' — show/hide that account's number in the menu bar."""
+    label = sys.argv[2] if len(sys.argv) > 2 else ""
+    entries = _current_entries()
+    if label not in [lbl for lbl, _ in entries]:
+        raise SystemExit("usage: toggle-account <label>")
+    _write_display([(lbl, (not show) if lbl == label else show) for lbl, show in entries])
+
+
+def do_move_account():
+    """'move-account <label> up|down' — reorder the accounts, menu bar and dropdown."""
+    label = sys.argv[2] if len(sys.argv) > 2 else ""
+    direction = sys.argv[3] if len(sys.argv) > 3 else ""
+    entries = _current_entries()
+    labels = [lbl for lbl, _ in entries]
+    if label not in labels or direction not in ("up", "down"):
+        raise SystemExit("usage: move-account <label> [up|down]")
+    i = labels.index(label)
+    j = i - 1 if direction == "up" else i + 1
+    if 0 <= j < len(entries):          # already at the end: nothing to do
+        entries[i], entries[j] = entries[j], entries[i]
+        _write_display(entries)
 
 
 # ------------------------------------------------------------------------ credentials
@@ -413,30 +489,19 @@ def util(obj):
     return u, obj.get("resets_at")
 
 
-def _title_pct(data, worst, mode):
-    """Menu-bar text for one account under the chosen display mode. Falls back to the
-    worst window when the chosen one has no data; a ⚠ flags a window the user isn't
-    showing (weekly, Opus, …) that is already in the red."""
+def _title_pct(data):
+    """Menu-bar text for one account: the current session — the rolling 5-hour window —
+    and nothing else. Returns None when the payload carries no session number; the
+    weekly and per-model windows never stand in for it, they live in the dropdown."""
     data = data if isinstance(data, dict) else {}
-    five = util(data.get("five_hour"))[0]
-    week = util(data.get("seven_day"))[0]
-    if mode == "five_hour" and five is not None:
-        text, visible = f"{round(five)}%", five
-    elif mode == "weekly" and week is not None:
-        text, visible = f"{round(week)}%", week
-    elif mode == "both" and (five is not None or week is not None):
-        f_txt = "–" if five is None else str(round(five))
-        w_txt = "–" if week is None else str(round(week))
-        text, visible = f"{f_txt}/{w_txt}%", max(v for v in (five, week) if v is not None)
-    else:
-        text, visible = f"{round(worst)}%", worst   # 'auto', or fallback
-    if worst >= RED_AT and visible < RED_AT:
-        text += "⚠"
-    return text
+    session = util(data.get("five_hour"))[0]
+    return None if session is None else f"{round(session)}%"
 
 
-def account_lines(acct, res):
-    """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct)."""
+def account_lines(acct, res, in_bar=True):
+    """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct).
+    `in_bar` is False for an account switched off in the menu bar — it still gets its
+    full section here, just a note saying why its number isn't up top."""
     label = acct.get("label", "account")
     lines = []
     worst = None
@@ -452,13 +517,14 @@ def account_lines(acct, res):
     data = res["data"] if isinstance(res["data"], dict) else {}
     five_u, five_r = util(data.get("five_hour"))
     week_u, week_r = util(data.get("seven_day"))
-    # Per-model weekly caps (Max plans meter Opus/Sonnet separately) count toward the
-    # summary too — they're often the first limit you actually hit. Leaving them out
-    # let the menu bar read "amber" while Opus was already maxed.
+    # Per-model weekly caps (Max plans meter Opus/Sonnet separately) count toward this
+    # account's status dot too — they're often the first limit you actually hit, and
+    # leaving them out let the dot read "amber" while Opus was already maxed.
     model_u = [util(data.get(k))[0] for k in ("seven_day_opus", "seven_day_sonnet")]
     worst = max([p for p in (five_u, week_u, *model_u) if p is not None], default=None)
 
-    head = label + ("  (cached)" if res["stale"] else "")
+    head = label + ("" if in_bar else "  ·  hidden from menu bar") \
+                 + ("  (cached)" if res["stale"] else "")
     lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
                  f"font=Menlo-Bold size=13 trim=false")
 
@@ -470,7 +536,7 @@ def account_lines(acct, res):
             text += f"   {r}"
         lines.append(f"{text} | font=Menlo size=13 trim=false color={c}")
 
-    row("5-hour", five_u, five_r)
+    row("session", five_u, five_r)      # the menu-bar number: rolling 5-hour window
     row("weekly", week_u, week_r)
 
     # Per-model weekly limits (Max plans often meter Opus separately).
@@ -725,23 +791,41 @@ def do_signin():
     print("    Claude icon → Refresh now.\n")
 
 
-def _footer():
+def _accounts_menu(plugin, accounts, prefs):
+    """The 'Accounts' submenu: click an account to show/hide its number in the menu
+    bar, and move it to reorder both the menu bar and the sections above."""
+    if not accounts:
+        return
+    hidden = hidden_labels(prefs)
+    dim = color_param("dim")
+    print("Accounts")
+    print(f"-- Click an account to show or hide it in the menu bar. | color={dim} size=11 trim=false")
+    for i, acct in enumerate(accounts):
+        label = acct.get("label", "account")
+        on = label not in hidden
+        print(f'-- {"✓" if on else "☐"} {label} | bash="{plugin}" param1=toggle-account '
+              f'param2="{label}" terminal=false refresh=true trim=false size=13'
+              f"{'' if on else f' color={dim}'}")
+        for name, direction, ok in (("↑ move up", "up", i > 0),
+                                    ("↓ move down", "down", i < len(accounts) - 1)):
+            if ok:
+                print(f'--     {name} | bash="{plugin}" param1=move-account param2="{label}" '
+                      f"param3={direction} terminal=false refresh=true trim=false "
+                      f"color={dim} size=11")
+
+
+def _footer(accounts=(), prefs=()):
     # ---- actions ----
     plugin = os.path.realpath(sys.argv[0])
     print(f'➕ Add Claude account… | bash="{plugin}" param1=signin terminal=true')
     print("Refresh now | refresh=true")
     print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
           f'param2="{CACHE_DIR}" terminal=false refresh=true')
-    mode = display_mode()
-    print("Menu bar shows")
-    for key, name in (("five_hour", "5-hour window"), ("weekly", "weekly window"),
-                      ("both", "5-hour / weekly"), ("auto", "worst window")):
-        mark = "✓ " if key == mode else "   "
-        print(f'-- {mark}{name} | bash="{plugin}" param1=set-display param2={key} '
-              f"terminal=false refresh=true trim=false")
+    _accounts_menu(plugin, accounts, prefs)
     print("About / setup")
-    print("-- Shows your Claude *plan* usage — the same 5-hour and weekly")
-    print("-- percentages `/usage` shows, not API dollar cost.")
+    print("-- Shows your Claude *plan* usage — the same percentages `/usage`")
+    print("-- shows, not API dollar cost. The menu bar is your current session")
+    print("-- (the rolling 5-hour window); weekly and per-model limits are here.")
     print("-- Sign in via the menu, or an existing Claude Code login is auto-detected.")
     print("-- Source: Anthropic’s plan-usage endpoint (api.anthropic.com/api/oauth/usage).")
     print("-- Numbers are cached ~3 min to respect the rate limit.")
@@ -757,7 +841,7 @@ def _welcome():
     print(f"Claude plan usage | size=12 color={color_param('dim')}")
     print("---")
     print("Not signed in yet | font=Menlo-Bold size=13 trim=false")
-    print(f"Add your Claude account below to see your 5-hour & weekly limits. "
+    print(f"Add your Claude account below to see your current session usage. "
           f"| color={color_param('dim')} size=12 trim=false")
     print("---")
     _footer()
@@ -765,11 +849,13 @@ def _welcome():
 
 def main():
     _ensure_config()
-    accounts = load_accounts()
+    prefs = _display_prefs()
+    hidden = hidden_labels(prefs)
+    accounts = order_accounts(load_accounts(), prefs)
     rendered = []           # (acct, res, lines, worst) — computed once per account
     for acct in accounts:
         res = usage_for(acct)
-        lines, worst = account_lines(acct, res)
+        lines, worst = account_lines(acct, res, acct.get("label") not in hidden)
         rendered.append((acct, res, lines, worst))
 
     # Onboard only when there's genuinely nothing to show: no signed-in account, no
@@ -781,15 +867,17 @@ def main():
         _welcome()
         return
 
-    # ---- menu bar title: only accounts that returned real numbers, showing the
-    # ---- window the user picked under "Menu bar shows" (default: 5-hour) ----
-    mode = display_mode()
-    shown = []          # (initial, text like "42%" or "42/90%⚠")
-    for acct, res, _, worst in rendered:
-        if res["ok"] and worst is not None:
+    # ---- menu bar title: the current session (rolling 5-hour) window, in the user's
+    # ---- order, for each account switched on that reports one. Weekly / per-model
+    # ---- limits — and the accounts switched off — stay in the dropdown ----
+    shown = []          # (initial, text like "42%")
+    for acct, res, _, _ in rendered:
+        if acct.get("label") in hidden:
+            continue
+        text = _title_pct(res["data"]) if res["ok"] else None
+        if text is not None:
             label = acct.get("label", "?")
-            shown.append((label[0].upper() if label else "?",
-                          _title_pct(res["data"], worst, mode)))
+            shown.append((label[0].upper() if label else "?", text))
 
     if not shown:
         # configured, but nothing readable yet — stay quiet and subtle
@@ -809,15 +897,18 @@ def main():
             print(ln)
         print("---")
 
-    _footer()
+    _footer(accounts, prefs)
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
         raise SystemExit(0)
-    if len(sys.argv) > 1 and sys.argv[1] == "set-display":
-        do_set_display()
+    if len(sys.argv) > 1 and sys.argv[1] == "toggle-account":
+        do_toggle_account()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "move-account":
+        do_move_account()
         raise SystemExit(0)
     try:
         main()
