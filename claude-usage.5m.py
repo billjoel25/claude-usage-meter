@@ -154,6 +154,124 @@ def _ensure_config():
         pass  # non-fatal; the widget still works without a config file
 
 
+# --------------------------------------------------------------- display preferences
+# Which accounts contribute their number to the menu bar, and in what order. Stored
+# as `accounts_display` in the config file — an ordered list of
+#   {"label": "personal", "menu_bar": true}
+# (a bare "personal" string is accepted too, meaning "shown"). Accounts absent from
+# the list keep their discovery order at the end and are shown, so the key is purely
+# optional: without it nothing changes. Hiding an account only takes it out of the
+# menu bar — its section, numbers and reset times stay in the dropdown.
+DISPLAY_KEY = "accounts_display"
+
+
+def _read_config():
+    """The config file as a dict — {} when it's absent, unreadable, or not an object."""
+    p = config_path()
+    if os.path.exists(p):
+        try:
+            with open(p) as fh:
+                cfg = json.load(fh)
+            if isinstance(cfg, dict):
+                return cfg
+        except Exception:
+            pass
+    return {}
+
+
+def _display_prefs():
+    """[(label, show_in_menu_bar)] from the config, skipping malformed entries."""
+    out = []
+    for e in _read_config().get(DISPLAY_KEY) or []:
+        if isinstance(e, str) and e:
+            out.append((e, True))
+        elif isinstance(e, dict) and e.get("label"):
+            out.append((str(e["label"]), e.get("menu_bar", True) is not False))
+    return out
+
+
+def order_accounts(accounts, prefs=None):
+    """`accounts` in display order: the ones named in `accounts_display` first, in
+    that order, then anything it doesn't mention in discovery order. Labels in the
+    config that no longer match an account are simply skipped."""
+    prefs = _display_prefs() if prefs is None else prefs
+    remaining = list(accounts)
+    ordered = []
+    for label, _ in prefs:
+        for i, a in enumerate(remaining):
+            if a.get("label") == label:
+                ordered.append(remaining.pop(i))
+                break
+    return ordered + remaining
+
+
+def hidden_labels(prefs=None):
+    """Labels switched off for the menu bar. Anything unlisted is shown."""
+    prefs = _display_prefs() if prefs is None else prefs
+    return {label for label, show in prefs if not show}
+
+
+def _config_for_write():
+    """The config dict to modify, or None when the file exists but must not be
+    touched (unreadable, or holding something other than an object)."""
+    p = config_path()
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as fh:
+            cfg = json.load(fh)
+    except Exception:
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def _write_display(entries):
+    """Persist `entries` ([(label, show)]) as the display order, leaving every other
+    key in the file alone. A config we can't safely rewrite is left untouched."""
+    cfg = _config_for_write()
+    if cfg is None:
+        return
+    cfg[DISPLAY_KEY] = [{"label": label, "menu_bar": show} for label, show in entries]
+    p = config_path()
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+
+
+def _current_entries():
+    """Today's accounts as [(label, show)] in display order — the basis each menu
+    action edits, so the first click writes a complete, hand-editable list and
+    entries for accounts that are gone drop out."""
+    prefs = _display_prefs()
+    hidden = hidden_labels(prefs)
+    return [(a.get("label", "account"), a.get("label") not in hidden)
+            for a in order_accounts(load_accounts(), prefs)]
+
+
+def do_toggle_account():
+    """'toggle-account <label>' — show/hide that account's number in the menu bar."""
+    label = sys.argv[2] if len(sys.argv) > 2 else ""
+    entries = _current_entries()
+    if label not in [lbl for lbl, _ in entries]:
+        raise SystemExit("usage: toggle-account <label>")
+    _write_display([(lbl, (not show) if lbl == label else show) for lbl, show in entries])
+
+
+def do_move_account():
+    """'move-account <label> up|down' — reorder the accounts, menu bar and dropdown."""
+    label = sys.argv[2] if len(sys.argv) > 2 else ""
+    direction = sys.argv[3] if len(sys.argv) > 3 else ""
+    entries = _current_entries()
+    labels = [lbl for lbl, _ in entries]
+    if label not in labels or direction not in ("up", "down"):
+        raise SystemExit("usage: move-account <label> [up|down]")
+    i = labels.index(label)
+    j = i - 1 if direction == "up" else i + 1
+    if 0 <= j < len(entries):          # already at the end: nothing to do
+        entries[i], entries[j] = entries[j], entries[i]
+        _write_display(entries)
+
+
 # ------------------------------------------------------------------------ credentials
 
 def _token_from_blob(blob):
@@ -380,8 +498,10 @@ def _title_pct(data):
     return None if session is None else f"{round(session)}%"
 
 
-def account_lines(acct, res):
-    """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct)."""
+def account_lines(acct, res, in_bar=True):
+    """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct).
+    `in_bar` is False for an account switched off in the menu bar — it still gets its
+    full section here, just a note saying why its number isn't up top."""
     label = acct.get("label", "account")
     lines = []
     worst = None
@@ -403,7 +523,8 @@ def account_lines(acct, res):
     model_u = [util(data.get(k))[0] for k in ("seven_day_opus", "seven_day_sonnet")]
     worst = max([p for p in (five_u, week_u, *model_u) if p is not None], default=None)
 
-    head = label + ("  (cached)" if res["stale"] else "")
+    head = label + ("" if in_bar else "  ·  hidden from menu bar") \
+                 + ("  (cached)" if res["stale"] else "")
     lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
                  f"font=Menlo-Bold size=13 trim=false")
 
@@ -670,13 +791,37 @@ def do_signin():
     print("    Claude icon → Refresh now.\n")
 
 
-def _footer():
+def _accounts_menu(plugin, accounts, prefs):
+    """The 'Accounts' submenu: click an account to show/hide its number in the menu
+    bar, and move it to reorder both the menu bar and the sections above."""
+    if not accounts:
+        return
+    hidden = hidden_labels(prefs)
+    dim = color_param("dim")
+    print("Accounts")
+    print(f"-- Click an account to show or hide it in the menu bar. | color={dim} size=11 trim=false")
+    for i, acct in enumerate(accounts):
+        label = acct.get("label", "account")
+        on = label not in hidden
+        print(f'-- {"✓" if on else "☐"} {label} | bash="{plugin}" param1=toggle-account '
+              f'param2="{label}" terminal=false refresh=true trim=false size=13'
+              f"{'' if on else f' color={dim}'}")
+        for name, direction, ok in (("↑ move up", "up", i > 0),
+                                    ("↓ move down", "down", i < len(accounts) - 1)):
+            if ok:
+                print(f'--     {name} | bash="{plugin}" param1=move-account param2="{label}" '
+                      f"param3={direction} terminal=false refresh=true trim=false "
+                      f"color={dim} size=11")
+
+
+def _footer(accounts=(), prefs=()):
     # ---- actions ----
     plugin = os.path.realpath(sys.argv[0])
     print(f'➕ Add Claude account… | bash="{plugin}" param1=signin terminal=true')
     print("Refresh now | refresh=true")
     print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
           f'param2="{CACHE_DIR}" terminal=false refresh=true')
+    _accounts_menu(plugin, accounts, prefs)
     print("About / setup")
     print("-- Shows your Claude *plan* usage — the same percentages `/usage`")
     print("-- shows, not API dollar cost. The menu bar is your current session")
@@ -704,11 +849,13 @@ def _welcome():
 
 def main():
     _ensure_config()
-    accounts = load_accounts()
+    prefs = _display_prefs()
+    hidden = hidden_labels(prefs)
+    accounts = order_accounts(load_accounts(), prefs)
     rendered = []           # (acct, res, lines, worst) — computed once per account
     for acct in accounts:
         res = usage_for(acct)
-        lines, worst = account_lines(acct, res)
+        lines, worst = account_lines(acct, res, acct.get("label") not in hidden)
         rendered.append((acct, res, lines, worst))
 
     # Onboard only when there's genuinely nothing to show: no signed-in account, no
@@ -720,10 +867,13 @@ def main():
         _welcome()
         return
 
-    # ---- menu bar title: the current session (rolling 5-hour) window, for each
-    # ---- account that reports one. Weekly / per-model limits stay in the dropdown ----
+    # ---- menu bar title: the current session (rolling 5-hour) window, in the user's
+    # ---- order, for each account switched on that reports one. Weekly / per-model
+    # ---- limits — and the accounts switched off — stay in the dropdown ----
     shown = []          # (initial, text like "42%")
     for acct, res, _, _ in rendered:
+        if acct.get("label") in hidden:
+            continue
         text = _title_pct(res["data"]) if res["ok"] else None
         if text is not None:
             label = acct.get("label", "?")
@@ -747,12 +897,18 @@ def main():
             print(ln)
         print("---")
 
-    _footer()
+    _footer(accounts, prefs)
 
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "toggle-account":
+        do_toggle_account()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "move-account":
+        do_move_account()
         raise SystemExit(0)
     try:
         main()

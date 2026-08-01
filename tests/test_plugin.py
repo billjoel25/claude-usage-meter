@@ -41,12 +41,13 @@ def _title_of(out):
     return out.splitlines()[0].split(" | ", 1)[0]
 
 
-def _render_main(data, label="personal"):
+def _render_main(data, label="personal", extra=()):
     """Run main() against a canned payload and return its stdout, with the account
-    lookup and the network stubbed out."""
+    lookup and the network stubbed out. `extra` adds more accounts as (label, payload)."""
+    payloads = dict([(label, data)] + list(extra))
     saved = (m.load_accounts, m.usage_for)
-    m.load_accounts = lambda: [{"label": label}]
-    m.usage_for = lambda acct: {"ok": True, "data": data, "stale": False,
+    m.load_accounts = lambda: [{"label": lbl} for lbl in payloads]
+    m.usage_for = lambda acct: {"ok": True, "data": payloads[acct["label"]], "stale": False,
                                 "age": 0, "error": None, "source": "stub"}
     buf = io.StringIO()
     try:
@@ -55,6 +56,28 @@ def _render_main(data, label="personal"):
     finally:
         m.load_accounts, m.usage_for = saved
     return buf.getvalue()
+
+
+def _sessions(*pairs):
+    """(label, payload) pairs carrying just a session percentage."""
+    return [(label, {"five_hour": {"utilization": pct}}) for label, pct in pairs]
+
+
+def _act(argv, labels):
+    """Run a menu action (toggle-account / move-account) against `labels`."""
+    saved = (m.load_accounts, sys.argv)
+    m.load_accounts = lambda: [{"label": lbl} for lbl in labels]
+    sys.argv = argv
+    try:
+        m.do_toggle_account() if argv[1] == "toggle-account" else m.do_move_account()
+    finally:
+        m.load_accounts, sys.argv = saved
+
+
+def _stored_order(tmp):
+    """[(label, menu_bar)] as persisted in the config file."""
+    cfg = json.load(open(os.path.join(tmp, "config.json")))
+    return [(e["label"], e["menu_bar"]) for e in cfg.get("accounts_display", [])]
 
 
 # --------------------------------------------------------------------- helpers
@@ -215,6 +238,170 @@ def test_stale_menu_bar_config_key_is_ignored():
     out = _render_main({"five_hour": {"utilization": 20}, "seven_day": {"utilization": 96}})
     assert _title_of(out).strip() == "20%", _title_of(out)
     assert json.load(open(cfg_file))["menu_bar"] == "weekly"
+
+
+# ------------------------------------------- accounts: order + menu-bar on/off
+
+def _accts(*labels):
+    return [{"label": lbl} for lbl in labels]
+
+
+def test_order_accounts_follows_config():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": [{"label": "work"}, {"label": "personal"}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    got = [a["label"] for a in m.order_accounts(_accts("personal", "work"))]
+    assert got == ["work", "personal"], got
+
+
+def test_order_accounts_appends_unlisted_and_skips_unknown():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": [{"label": "gone"}, {"label": "work"}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    # 'gone' no longer exists -> skipped; 'new' isn't listed -> keeps its place at the end
+    got = [a["label"] for a in m.order_accounts(_accts("personal", "work", "new"))]
+    assert got == ["work", "personal", "new"], got
+
+
+def test_display_prefs_tolerates_hand_edits():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": ["work", {"label": "personal", "menu_bar": False},
+                                    {"no_label": 1}, 42, {"label": "x", "menu_bar": "yes"}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    assert m._display_prefs() == [("work", True), ("personal", False), ("x", True)]
+    assert m.hidden_labels() == {"personal"}          # a bare string means "shown"
+
+
+def test_no_config_means_no_change():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    accounts = _accts("personal", "work")
+    assert [a["label"] for a in m.order_accounts(accounts)] == ["personal", "work"]
+    assert m.hidden_labels() == set()
+
+
+def test_menu_bar_follows_the_configured_order():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": [{"label": "work"}, {"label": "personal"}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    (wl, wd), (pl, pd) = _sessions(("work", 40), ("personal", 96))
+    out = _render_main(pd, label=pl, extra=[(wl, wd)])
+    assert _title_of(out).strip() == "W 40% · P 96%", _title_of(out)
+
+
+def test_menu_bar_skips_disabled_accounts_and_keeps_order():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": [{"label": "work", "menu_bar": True},
+                                    {"label": "personal", "menu_bar": False}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    (wl, wd), (pl, pd) = _sessions(("work", 40), ("personal", 96))
+    out = _render_main(pd, label=pl, extra=[(wl, wd)])
+    # one account left showing -> the single-account format: just its percentage
+    assert _title_of(out).strip() == "40%", _title_of(out)
+    assert "96" not in _title_of(out)
+    # …but personal keeps its full section in the dropdown, flagged and ordered
+    body = out.splitlines()
+    assert any("personal" in ln and "hidden from menu bar" in ln for ln in body)
+    assert any("96%" in ln for ln in body)
+    assert body.index([ln for ln in body if ln.startswith("work")][0]) < \
+           body.index([ln for ln in body if ln.startswith("personal")][0])
+
+
+def test_menu_bar_quiet_when_every_account_is_off():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts_display": [{"label": "personal", "menu_bar": False}]},
+              open(os.path.join(tmp, "config.json"), "w"))
+    out = _render_main({"five_hour": {"utilization": 96}})
+    assert _title_of(out).strip() == "Claude", _title_of(out)
+    assert any("96%" in ln for ln in out.splitlines())            # still in the dropdown
+
+
+def test_toggle_account_roundtrip():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"accounts": [{"label": "work"}]}, open(os.path.join(tmp, "config.json"), "w"))
+    _act(["p", "toggle-account", "work"], ["personal", "work"])
+    # the first click writes the whole list, so it reads cleanly by hand
+    assert _stored_order(tmp) == [("personal", True), ("work", False)]
+    _act(["p", "toggle-account", "work"], ["personal", "work"])
+    assert _stored_order(tmp) == [("personal", True), ("work", True)]
+    # unrelated keys survive
+    assert json.load(open(os.path.join(tmp, "config.json")))["accounts"] == [{"label": "work"}]
+
+
+def test_move_account_reorders_and_clamps():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    labels = ["personal", "work", "side project"]
+    _act(["p", "move-account", "side project", "up"], labels)
+    assert _stored_order(tmp) == [("personal", True), ("side project", True), ("work", True)]
+    _act(["p", "move-account", "personal", "down"], labels)
+    assert _stored_order(tmp) == [("side project", True), ("personal", True), ("work", True)]
+    # moving the first one up is a no-op, not an error or a wrap-around
+    _act(["p", "move-account", "side project", "up"], labels)
+    assert _stored_order(tmp) == [("side project", True), ("personal", True), ("work", True)]
+
+
+def test_move_preserves_the_on_off_state():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    _act(["p", "toggle-account", "work"], ["personal", "work"])
+    _act(["p", "move-account", "work", "up"], ["personal", "work"])
+    assert _stored_order(tmp) == [("work", False), ("personal", True)]
+
+
+def test_display_actions_reject_bad_input():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    for argv in (["p", "toggle-account", "nope"], ["p", "toggle-account"],
+                 ["p", "move-account", "personal", "sideways"], ["p", "move-account", "nope", "up"]):
+        try:
+            _act(argv, ["personal", "work"])
+            raise AssertionError(f"expected SystemExit for {argv}")
+        except SystemExit:
+            pass
+    assert not os.path.exists(os.path.join(tmp, "config.json"))    # nothing written
+
+
+def test_display_actions_leave_a_corrupt_config_alone():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    cfg_file = os.path.join(tmp, "config.json")
+    open(cfg_file, "w").write("{broken")
+    _act(["p", "toggle-account", "work"], ["personal", "work"])
+    _act(["p", "move-account", "work", "up"], ["personal", "work"])
+    assert open(cfg_file).read() == "{broken"
+
+
+def test_accounts_submenu_rendered():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    prefs = [("personal", True), ("side project", False)]
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        m._footer(_accts("personal", "side project"), prefs)
+    out = buf.getvalue()
+    assert "Accounts" in out
+    assert "-- ✓ personal" in out and "-- ☐ side project" in out
+    # labels are quoted, so a space in one doesn't split the action's params
+    assert 'param2="side project"' in out
+    # ends of the list don't offer a move that goes nowhere
+    assert out.count("move up") == 1 and out.count("move down") == 1
+
+
+def test_footer_without_accounts_has_no_submenu():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        m._footer()                    # the welcome screen path
+    assert "toggle-account" not in buf.getvalue()
 
 
 # ---------------------------------------------------- account collision fix

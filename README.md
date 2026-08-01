@@ -13,7 +13,7 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳ 96%  · L 40%           ← menu bar (always the current session)
+✳ P 96%  · W 40%         ← menu bar (always the current session)
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -22,9 +22,18 @@ personal
 work
   session [████░░░░░░] 40%  resets in 3h10m
   weekly  [████████░░] 80%  resets in 4d0h
+────────────────────────
+Accounts
+  ✓ personal              ← click to hide it from the menu bar
+     ↓ move down
+  ✓ work
+     ↑ move up
 ```
 
 - **Sign in with Claude** — one click, browser login, no CLI. Add several accounts.
+- **Choose which accounts appear, and in what order** — dropdown → **Accounts**: click
+  one to show or hide its number in the menu bar, or move it up/down. A hidden account
+  keeps its full section in the dropdown, so you still see its numbers on a click.
 - **Current session only, up top** — the menu bar is always the rolling 5-hour
   session percentage; a higher weekly or Opus number never takes its place. Open the
   dropdown for the weekly cap, per-model caps, and extra-usage credits, where each
@@ -148,6 +157,10 @@ each account tries its token sources in order:
     { "label": "personal", "keychain_service": "Claude Code-credentials",
       "credentials_file": "~/.claude/.credentials.json" },
     { "label": "work", "keychain_service": "Claude Code-credentials-XXXXXXXX" }
+  ],
+  "accounts_display": [
+    { "label": "work", "menu_bar": true },
+    { "label": "personal", "menu_bar": false }
   ]
 }
 ```
@@ -158,6 +171,14 @@ each account tries its token sources in order:
 | `token`            | a literal token (discouraged — sensitive)                        |
 | `credentials_file` | path to a Claude Code `.credentials.json`                        |
 | `keychain_service` | macOS Keychain generic-password service name                     |
+
+`accounts_display` is the dropdown → **Accounts** submenu written down: the list order
+is the display order (menu bar *and* dropdown sections), and `menu_bar: false` keeps an
+account out of the menu bar while leaving its section in the dropdown. It covers
+signed-in accounts too, not just the `accounts` above. Everything about it is optional —
+accounts it doesn't mention follow at the end and are shown, so without the key nothing
+changes. A bare `"work"` string works as an order-only entry, and a label that no longer
+matches an account is ignored.
 
 ## Tuning
 

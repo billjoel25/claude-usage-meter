@@ -6,6 +6,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Account order and menu-bar on/off.** A new **Accounts** submenu in the
+  dropdown: click an account to show or hide its number in the menu bar, or move
+  it up/down. The order applies to the menu bar *and* the dropdown sections. A
+  hidden account keeps its full section in the dropdown — usage rows, reset
+  times, sign out — marked *hidden from menu bar*, so nothing is lost from view.
+  Choices persist as `accounts_display` in the config file, an ordered list of
+  `{"label": …, "menu_bar": true|false}` that is equally editable by hand and
+  covers signed-in accounts as well as hand-configured ones. Accounts it doesn't
+  mention follow at the end and are shown, so the key stays optional.
+
 ### Changed
 - **The menu bar now shows only your current session** — the rolling 5-hour window.
   A higher weekly or per-model (Opus/Sonnet) number no longer replaces it, and the
