@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import time
+import urllib.error
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -473,6 +474,183 @@ def test_footer_quotes_paths():
     assert 'param2="' in out
     assert "Menu bar shows" not in out    # window selector removed
     assert "set-display" not in out
+
+
+# ------------------------------------------- cache: expires and clears on its own
+
+def _write_cache(label, fetched_ago=0, session_reset="2099-01-01T00:00:00Z", pct=57):
+    os.makedirs(m.CACHE_DIR, exist_ok=True)
+    json.dump({"fetched_at": time.time() - fetched_ago, "source": "file",
+               "data": {"five_hour": {"utilization": pct, "resets_at": session_reset},
+                        "seven_day": {"utilization": 24,
+                                      "resets_at": "2099-01-01T00:00:00Z"}}},
+              open(m.cache_path(label), "w"))
+
+
+def _stub_network(token=("t", None, "file"), fetcher=None, oauth=None):
+    """Swap out token lookup and the HTTP call. Returns what to hand _restore."""
+    saved = (m.get_token, m.fetch_usage, m._oauth_token)
+    m.get_token = lambda a: token
+    m.fetch_usage = fetcher or (lambda t: {"five_hour": {"utilization": 1}})
+    if oauth:
+        m._oauth_token = oauth
+    return saved
+
+
+def _restore(saved):
+    m.get_token, m.fetch_usage, m._oauth_token = saved
+
+
+def _http401(_token):
+    raise urllib.error.HTTPError("https://x", 401, "unauthorized", None, None)
+
+
+def test_stale_cache_carries_a_blip_but_not_forever():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        _write_cache("p", fetched_ago=300)             # 5 min old, windows still live
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and res["stale"], res         # carried through the failure
+        assert os.path.exists(m.cache_path("p"))
+        _write_cache("p", fetched_ago=m.STALE_MAX + 60)
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"], res                      # too old to stand in
+        assert not os.path.exists(m.cache_path("p"))   # and cleared without being asked
+    finally:
+        _restore(saved)
+
+
+def test_cache_expires_once_its_window_has_reset():
+    """The real-world failure: 57% sitting in the menu bar beside 'resetting now'.
+    The window it described is over, so the number is wrong however fresh the fetch."""
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        _write_cache("p", fetched_ago=5, session_reset="2000-01-01T00:00:00Z")
+        res = m.usage_for({"label": "p"})              # inside CACHE_TTL, still dropped
+        assert not res["ok"], res
+        assert not os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_rate_limiting_keeps_the_cache():
+    """429 is transient by definition — exactly what a stale cache is for."""
+    _isolate(tempfile.mkdtemp())
+
+    def limited(_t):
+        raise urllib.error.HTTPError("https://x", 429, "slow down", None, None)
+
+    saved = _stub_network(fetcher=limited)
+    try:
+        _write_cache("p", fetched_ago=300)
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and res["stale"]
+        assert "429" in res["error"]
+        assert os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_401_self_heals_when_the_refresh_token_still_works():
+    """An access token can be dead while the refresh behind it works. That should
+    recover by itself, not ask for a sign-out and re-add."""
+    _isolate(tempfile.mkdtemp())
+    tried = []
+
+    def fetch(tok):
+        tried.append(tok)
+        if tok == "dead":
+            _http401(tok)
+        return {"five_hour": {"utilization": 12}}
+
+    saved = _stub_network(token=("dead", None, "signed in"), fetcher=fetch,
+                          oauth=lambda a, force=False: ("fresh", None, "signed in"))
+    try:
+        res = m.usage_for({"label": "p", "refresh_token": "r"})
+        assert res["ok"] and not res["stale"], res
+        assert res["data"]["five_hour"]["utilization"] == 12
+        assert tried == ["dead", "fresh"], tried       # exactly one retry
+        assert os.path.exists(m.cache_path("p"))       # the live reading is cached
+    finally:
+        _restore(saved)
+
+
+def test_401_that_cannot_heal_drops_the_cache_without_a_second_request():
+    _isolate(tempfile.mkdtemp())
+    tried = []
+
+    def fetch(tok):
+        tried.append(tok)
+        _http401(tok)
+
+    saved = _stub_network(token=("dead", None, "signed in"), fetcher=fetch,
+                          oauth=lambda a, force=False: ("dead", None, "signed in"))
+    try:
+        # older than CACHE_TTL so a fetch is attempted, younger than STALE_MAX so
+        # only the 401 itself can be what drops it
+        _write_cache("p", fetched_ago=m.CACHE_TTL + 60)
+        res = m.usage_for({"label": "p", "refresh_token": "r"})
+        assert not res["ok"] and "401" in res["error"], res
+        assert not os.path.exists(m.cache_path("p"))   # rejected token -> numbers go
+        assert tried == ["dead"], tried                # no pointless repeat call
+    finally:
+        _restore(saved)
+
+
+def test_401_without_any_refresh_token_just_reports():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=("dead", None, "keychain"), fetcher=_http401)
+    try:
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"] and "401" in res["error"]
+        assert "run `claude`" in res["error"]          # not an in-app sign-in
+    finally:
+        _restore(saved)
+
+
+def test_unusable_cache_file_is_cleaned_up():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        os.makedirs(m.CACHE_DIR, exist_ok=True)
+        open(m.cache_path("p"), "w").write("{broken")
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"]
+        assert not os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_a_live_fetch_always_wins():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(fetcher=lambda t: {"five_hour": {"utilization": 3}})
+    try:
+        _write_cache("p", fetched_ago=m.STALE_MAX + 60, pct=99)
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and not res["stale"]
+        assert res["data"]["five_hour"]["utilization"] == 3
+    finally:
+        _restore(saved)
+
+
+def test_expired_numbers_say_so_rather_than_blaming_the_login():
+    res = {"ok": False, "data": None, "stale": False, "age": None,
+           "error": "TimeoutError", "source": None}
+    lines, _ = m.account_lines({"label": "p"}, res)
+    assert any("cached numbers had expired" in ln for ln in lines), lines
+    res["error"] = "401 — sign-in invalid, re-add the account"
+    lines, _ = m.account_lines({"label": "p"}, res)
+    assert any("Not logged into this account" in ln for ln in lines), lines
+
+
+def test_windows_reset_detection():
+    assert m._windows_reset({"five_hour": {"resets_at": "2000-01-01T00:00:00Z"}}, time.time())
+    assert not m._windows_reset({"five_hour": {"resets_at": "2099-01-01T00:00:00Z"}}, time.time())
+    assert not m._windows_reset({"five_hour": {"utilization": 5}}, time.time())   # no date
+    assert not m._windows_reset({"five_hour": {"resets_at": "nonsense"}}, time.time())
+    assert not m._windows_reset(None, time.time())
 
 
 # --------------------------------------------- session privacy (org visibility)

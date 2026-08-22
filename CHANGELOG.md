@@ -30,6 +30,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mention follow at the end and are shown, so the key stays optional.
 
 ### Changed
+- **The cache expires and clears itself.** A failed fetch is still carried by the
+  last good reading — but only for `STALE_MAX` (30 min), and never past the reset
+  time the reading itself carries: a window that has already rolled over makes its
+  number wrong, not merely old. Beyond that the numbers are dropped *and the cache
+  file deleted*, so the account falls back to an error rather than showing a
+  confident, stale percentage in the menu bar indefinitely. **Force refresh (clear
+  cache)** remains, but is no longer something you have to remember to click. A
+  cache file that won't parse is now cleaned up the same way, and signing an
+  account back in drops its old cache so a re-add starts clean.
 - **The menu bar now shows only your current session** — the rolling 5-hour window.
   A higher weekly or per-model (Opus/Sonnet) number no longer replaces it, and the
   **⚠** cross-window marker is gone, so the number up top is always the one window.
@@ -43,6 +52,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   action — with the menu bar fixed to the current session there is nothing to pick.
   The `"menu_bar"` config key is no longer read; a leftover one is ignored, not
   rewritten, and new starter configs omit it.
+
+### Fixed
+- **A rejected token now heals itself where it can.** On a 401 the widget forces
+  one token refresh and retries before reporting anything — an access token can be
+  dead while the refresh token behind it still works, which previously meant a
+  needless sign-out-and-re-add. If that doesn't take, the stale cache for the
+  account is cleared rather than left standing. The retry is skipped when the
+  refresh returns the same token, so a genuinely dead account costs no extra
+  request per tick.
 
 ## [1.2.0] - 2026-07-14
 

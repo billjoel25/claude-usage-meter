@@ -46,6 +46,11 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # The endpoint aggressively rate-limits requests without a claude-code User-Agent.
 UA = "claude-code/2.0.0 (claude-usage-meter)"
 CACHE_TTL = 180          # seconds — the endpoint 429s if polled harder than ~3 min
+# How long the cache may stand in for a live reading. Long enough to carry a blip —
+# a Keychain prompt that timed out, a dropped network, a 429 — and no longer. Past
+# it the numbers clear themselves instead of waiting to be cleared by hand: a
+# confidently wrong percentage in the menu bar is worse than no percentage.
+STALE_MAX = 1800         # seconds (6 refresh ticks)
 HTTP_TIMEOUT = 12        # seconds
 APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.config/claude-usage-meter"))
 CACHE_DIR = os.path.join(APP_DIR, "cache")
@@ -668,9 +673,39 @@ def _slug(s):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s)).lower() or "acct"
 
 
+def _store_usage(cp, data, now, source):
+    """Cache a live reading and return it. A cache we can't write is not a reason to
+    withhold numbers we just fetched."""
+    try:
+        with open(cp, "w") as fh:
+            json.dump({"fetched_at": now, "data": data, "source": source}, fh)
+    except Exception:
+        pass
+    return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
+
+
+def _retry_after_401(acct, cp, now, tried):
+    """One self-healing retry after the server rejects a token: force a refresh and
+    fetch again. An access token can be dead while the refresh token behind it still
+    works, and recovering here saves a sign-out-and-re-add the user shouldn't need.
+
+    Returns the live result, or None when there is no refresh token, the refresh
+    didn't produce a different token, or the second attempt failed too."""
+    if not acct.get("refresh_token"):
+        return None
+    try:
+        token, _, source = _oauth_token(acct, force=True)
+        if not token or token == tried:
+            return None          # nothing new to try — don't spend a second request
+        return _store_usage(cp, fetch_usage(token), now, source)
+    except Exception:
+        return None
+
+
 def usage_for(acct):
-    """Return dict: {ok, data, stale, age, error, source}. Uses a 180s cache to
-    stay well under the endpoint's rate limit and to survive transient failures."""
+    """Return dict: {ok, data, stale, age, error, source}. A 180s cache keeps us well
+    under the endpoint's rate limit; beyond that the cache carries a transient failure
+    for a while and then expires itself — see _fallback."""
     label = acct.get("label", "account")
     os.makedirs(CACHE_DIR, exist_ok=True)
     cp = cache_path(label)
@@ -683,43 +718,95 @@ def usage_for(acct):
         except Exception:
             cached = None
 
-    # Serve a fresh-enough cache without touching the network.
+    # Serve a fresh-enough cache without touching the network — unless a window it
+    # describes has already reset, which makes it wrong however recently we fetched.
     now = time.time()
-    if cached and (now - cached.get("fetched_at", 0)) < CACHE_TTL:
+    if cached and (now - cached.get("fetched_at", 0)) < CACHE_TTL \
+            and not _windows_reset(cached.get("data"), now):
         return {"ok": True, "data": cached["data"], "stale": False,
                 "age": now - cached["fetched_at"], "error": None, "source": cached.get("source")}
 
     token, exp, source = get_token(acct)
     if not token:
-        return _fallback(cached, now, error=source)
+        return _fallback(cached, now, error=source, cache_file=cp)
 
     # Signed-in (OAuth) accounts are refreshed in-app; a stale one means "re-add",
     # not "run claude" (which only applies to an auto-detected Claude Code login).
     is_oauth = acct.get("kind") == "oauth" or bool(acct.get("refresh_token"))
 
     if exp and _to_ms(exp) < now * 1000:
-        return _fallback(cached, now, error=(
+        return _fallback(cached, now, cache_file=cp, error=(
             "sign-in expired — sign out and re-add" if is_oauth
             else "token expired — run `claude` to refresh login"))
 
     try:
-        data = fetch_usage(token)
-        with open(cp, "w") as fh:
-            json.dump({"fetched_at": now, "data": data, "source": source}, fh)
-        return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
+        return _store_usage(cp, fetch_usage(token), now, source)
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return _fallback(cached, now, error=(
+            healed = _retry_after_401(acct, cp, now, token)
+            if healed:
+                return healed
+            return _fallback(cached, now, cache_file=cp, drop=True, error=(
                 "401 — sign-in invalid, re-add the account" if is_oauth
                 else "401 — login invalid/expired, run `claude`"))
         if e.code == 429:
-            return _fallback(cached, now, error="429 — rate limited, showing cache")
-        return _fallback(cached, now, error=f"HTTP {e.code}")
+            return _fallback(cached, now, cache_file=cp, error="429 — rate limited, showing cache")
+        return _fallback(cached, now, cache_file=cp, error=f"HTTP {e.code}")
     except Exception as e:
-        return _fallback(cached, now, error=f"{type(e).__name__}")
+        return _fallback(cached, now, cache_file=cp, error=f"{type(e).__name__}")
 
 
-def _fallback(cached, now, error):
+def _iso_epoch(iso):
+    """Epoch seconds for an ISO-8601 reset time, or None when it isn't one."""
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _windows_reset(data, now):
+    """True once a window in this payload has passed its own resets_at. Whatever the
+    number was, the window it described is over — so the number is wrong now, not
+    merely old, however recently it was fetched."""
+    if not isinstance(data, dict):
+        return False
+    for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        when = _iso_epoch(util(data.get(key))[1])
+        if when is not None and when <= now:
+            return True
+    return False
+
+
+def _drop_cache(cache_file):
+    """Delete a cache entry. Nothing in it is precious — it is a copy of a reading
+    the server will hand back the moment we can ask again."""
+    try:
+        if cache_file and os.path.exists(cache_file):
+            os.remove(cache_file)
+    except Exception:
+        pass          # non-fatal: worst case it expires again on the next tick
+
+
+def _cache_expired(cached, now):
+    """Can these cached numbers still be true? Unusable, past STALE_MAX, or
+    describing a window that has since reset — all mean no."""
+    if not isinstance(cached, dict) or "data" not in cached:
+        return True
+    if now - cached.get("fetched_at", 0) > STALE_MAX:
+        return True
+    return _windows_reset(cached.get("data"), now)
+
+
+def _fallback(cached, now, error, cache_file=None, drop=False):
+    """Stand in for a live reading with the last good numbers — but only while they
+    can still be true. Once they can't, they are dropped *and deleted*, and the
+    account reports the error on its own. `drop` forces that for a failure the
+    numbers can't come back from by themselves.
+
+    This is the clearing that used to need a trip to 'Force refresh (clear cache)'."""
+    if drop or _cache_expired(cached, now):
+        _drop_cache(cache_file)
+        cached = None
     if cached and "data" in cached:
         return {"ok": True, "data": cached["data"], "stale": True,
                 "age": now - cached.get("fetched_at", now), "error": error,
@@ -814,11 +901,16 @@ def account_lines(acct, res, in_bar=True):
     worst = None
 
     if not res["ok"]:
-        lines.append(f"{label} — {res['error'] or 'not logged in'} "
+        err = res["error"] or "not logged in"
+        lines.append(f"{label} — {err} "
                      f"| sfimage=circle.dashed sfcolor={sf('dim')} color={color_param('dim')} "
                      f"font=Menlo-Bold size=13 trim=false")
-        lines.append(f"-- Not logged into this account, or credentials unreachable. "
-                     f"See 'About / setup'. | color={color_param('dim')} size=12")
+        auth = any(k in err for k in ("401", "sign-in", "logged in", "token"))
+        hint = ("Not logged into this account, or credentials unreachable. "
+                "See 'About / setup'." if auth else
+                "No live reading, and the cached numbers had expired — better nothing "
+                "than something wrong.")
+        lines.append(f"-- {hint} | color={color_param('dim')} size=12")
         return lines, worst
 
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -940,12 +1032,13 @@ def _store_tokens(label, tok, email=None):
     return data
 
 
-def _oauth_token(acct):
+def _oauth_token(acct, force=False):
     """(access_token, expires_at_ms, source) for an app-managed account, refreshing
-    via the refresh_token when the access token is stale."""
+    via the refresh_token when the access token is stale — or when `force` says the
+    server has already rejected it, whatever the stored expiry claims."""
     now_ms = int(time.time() * 1000)
     exp = acct.get("expires_at")
-    if exp and exp - now_ms > 60_000:
+    if not force and exp and exp - now_ms > 60_000:
         return acct.get("access_token"), exp, "signed in"
     rt = acct.get("refresh_token")
     if not rt:
@@ -1092,6 +1185,7 @@ def do_signin():
         print("     so it won't overwrite the other. Rename it later from the config file.")
         label = safe
     _store_tokens(label, tok, email=email)
+    _drop_cache(cache_path(label))   # a re-add starts clean, not on the old numbers
     who = email or label
     print(f"\n  ✓ Signed in as {who}.")
     print("    It appears in the menu bar within a few minutes — or click the")

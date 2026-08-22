@@ -256,16 +256,24 @@ For the rest, edit the constants near the top of `claude-usage.5m.py`:
 
 - `AMBER_AT` / `RED_AT` — the % thresholds for yellow/red.
 - `CACHE_TTL` — cache lifetime in seconds (keep ≥ 180 to avoid 429s).
+- `STALE_MAX` — how long a cached reading may stand in for a live one when a fetch
+  fails (default 30 min). Past it the numbers are dropped and the cache file deleted.
 - Rename the file's `.5m.` segment to change the refresh interval.
 
 ## Troubleshooting
 
 - **"not logged in"** — click **➕ Add Claude account** and sign in.
 - **"sign-in expired"** — sign out and add the account again.
-- **"429 — rate limited"** — you're polling too hard; it recovers next tick.
+- **"429 — rate limited"** — you're polling too hard; it recovers next tick. The
+  cached numbers keep showing meanwhile, which is exactly what they're for.
 - **Widget missing from the menu bar** — it's usually hidden behind the notch on a
   full menu bar. Free up space, or use a menu-bar manager to reveal it.
-- **Numbers frozen** — dropdown → **Force refresh (clear cache)**.
+- **Numbers frozen** — they shouldn't stay that way on their own. When a fetch keeps
+  failing, the cached reading stands in for up to `STALE_MAX` (30 min) and then clears
+  itself, so the account drops to an error rather than showing a number that's quietly
+  wrong. A cached window that has passed its own reset time is dropped immediately,
+  whatever its age. **Force refresh (clear cache)** is still there if you'd rather not
+  wait — but you shouldn't need it.
 
 ## Contributing
 
