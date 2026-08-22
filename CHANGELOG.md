@@ -7,6 +7,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Org privacy indicator.** A dot beside the usage number answering one question:
+  can my employer read my Claude Code sessions right now? Green when the plan is
+  on its known-good baseline with no org policy on the machine; **red** when the
+  plan moves off baseline, when a managed settings file appears, or when any
+  OpenTelemetry prompt/response logging variable is switched on — in the org's
+  policy file, your environment, or `~/.claude/settings*.json`; **amber** when it
+  can't tell. Red names which signal tripped and shows the observed value, and
+  the last transition is persisted so it reports *"changed 2h ago: …"* rather
+  than just a value. It never matches a guessed Enterprise string — it holds a
+  baseline and alerts on anything else — and it never reports a failed read as
+  fine. Configurable via `privacy_indicator` (`always` / `alert` / `off`) and
+  `privacy_baseline`.
 - **Account order and menu-bar on/off.** A new **Accounts** submenu in the
   dropdown: click an account to show or hide its number in the menu bar, or move
   it up/down. The order applies to the menu bar *and* the dropdown sections. A
