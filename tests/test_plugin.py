@@ -118,9 +118,30 @@ def test_sev_thresholds():
     assert m.sev(0) == "green"
     assert m.sev(49) == "green"
     assert m.sev(50) == "amber"      # AMBER_AT
-    assert m.sev(84) == "amber"
-    assert m.sev(85) == "red"        # RED_AT
-    assert m.sev(150) == "red"
+    assert m.sev(85) == "amber"      # no red tier by default…
+    assert m.sev(150) == "amber"     # …however close to the ceiling
+    saved = m.RED_AT
+    m.RED_AT = 85                    # opt back in, and red returns
+    try:
+        assert m.sev(84) == "amber"
+        assert m.sev(85) == "red"
+    finally:
+        m.RED_AT = saved
+
+
+def test_usage_never_turns_red_by_default():
+    """The screenshot that prompted this: weekly at 85% with 33h to run, painted red.
+    Approaching a limit isn't an emergency — the number and the reset time say how
+    close you are, so neither the rows nor the header dot go red."""
+    data = {"five_hour": {"utilization": 21, "resets_at": "2099-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 85, "resets_at": "2099-01-01T00:00:00Z"},
+            "seven_day_opus": {"utilization": 100}}
+    res = {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": "x"}
+    lines, _ = m.account_lines({"label": "Work"}, res)
+    for ln in lines:
+        assert m.color_param("red") not in ln and m.sf("red") not in ln, ln
+    assert any("85%" in ln and m.color_param("amber") in ln for ln in lines), lines
+    assert any("21%" in ln and m.color_param("green") in ln for ln in lines), lines
 
 
 def test_bar_clamps():
@@ -178,7 +199,7 @@ def test_worst_includes_per_model_limits():
     res = {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": "x"}
     _, worst = m.account_lines({"label": "p"}, res)
     assert worst == 91, worst
-    assert m.sev(worst) == "red"
+    assert m.sev(worst) == "amber"   # loud enough; usage has no red tier
 
 
 def test_account_lines_survives_non_dict_payload():

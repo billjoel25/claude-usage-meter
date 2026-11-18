@@ -56,9 +56,13 @@ APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.confi
 CACHE_DIR = os.path.join(APP_DIR, "cache")
 ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 
-# Utilization thresholds -> severity. Green until half, amber, red near the ceiling.
+# Utilization thresholds -> severity. Green until half, then amber — and that's as
+# loud as usage gets. Nearing a limit isn't an emergency, and red read as one: a
+# weekly window at 85% with a day and a half still to run turned the dropdown into an
+# alarm. The percentage and the reset countdown already say how close you are.
+# Set RED_AT (e.g. 85) to bring a red tier back.
 AMBER_AT = 50
-RED_AT = 85
+RED_AT = None
 
 # (light, dark) hex so it reads on both menu-bar appearances.
 COLORS = {
@@ -827,7 +831,7 @@ def _to_ms(v):
 def sev(pct):
     if pct is None:
         return "dim"
-    if pct >= RED_AT:
+    if RED_AT is not None and pct >= RED_AT:
         return "red"
     if pct >= AMBER_AT:
         return "amber"

@@ -30,6 +30,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mention follow at the end and are shown, so the key stays optional.
 
 ### Changed
+- **Usage never turns red.** Rows and the account dot stop at amber, however close
+  a window is to its limit. Red read as an emergency — a weekly window at 85% with
+  a day and a half still to run lit the dropdown up like an alarm — when the number
+  and its reset countdown already say exactly how close you are. `RED_AT` is now
+  `None` by default; set it (e.g. `85`) to bring a red tier back. The privacy light
+  keeps its red: that one marks something that actually needs your attention.
 - **The cache expires and clears itself.** A failed fetch is still carried by the
   last good reading — but only for `STALE_MAX` (30 min), and never past the reset
   time the reading itself carries: a window that has already rolled over makes its
