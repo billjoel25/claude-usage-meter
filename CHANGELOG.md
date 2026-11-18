@@ -7,18 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Org privacy indicator.** A dot beside the usage number answering one question:
-  can my employer read my Claude Code sessions right now? Green when the plan is
-  on its known-good baseline with no org policy on the machine; **red** when the
-  plan moves off baseline, when a managed settings file appears, or when any
-  OpenTelemetry prompt/response logging variable is switched on — in the org's
-  policy file, your environment, or `~/.claude/settings*.json`; **amber** when it
-  can't tell. Red names which signal tripped and shows the observed value, and
-  the last transition is persisted so it reports *"changed 2h ago: …"* rather
-  than just a value. It never matches a guessed Enterprise string — it holds a
-  baseline and alerts on anything else — and it never reports a failed read as
-  fine. Configurable via `privacy_indicator` (`always` / `alert` / `off`) and
-  `privacy_baseline`.
+- **Plan-change notification.** If your Claude org ever moves off Team — to
+  Enterprise, where admins may be able to read your Claude Code sessions — you get
+  a single macOS notification, sent through SwiftBar. Nothing shows in the menu bar
+  or the dropdown, before or after. It watches `oauthAccount.organizationType` in
+  `~/.claude.json` and fires on any move off `claude_team`, quoting what it read,
+  since the string an Enterprise org reports isn't known. A file it can't read is
+  skipped, never reported as a change. `notify-test` checks that macOS will show it.
 - **Account order and menu-bar on/off.** A new **Accounts** submenu in the
   dropdown: click an account to show or hide its number in the menu bar, or move
   it up/down. The order applies to the menu bar *and* the dropdown sections. A
@@ -37,8 +32,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   close you are. The color is set explicitly (black, or white in dark mode), since
   SwiftBar draws items without an action as disabled gray. For the old look, set
   `"colors": "status"`: green below half, amber above, and red only if `RED_AT` is
-  set — it now defaults to `None`. The privacy light keeps its colors: that one
-  marks something that actually needs your attention.
+  set — it now defaults to `None`.
 - **The cache expires and clears itself.** A failed fetch is still carried by the
   last good reading — but only for `STALE_MAX` (30 min), and never past the reset
   time the reading itself carries: a window that has already rolled over makes its

@@ -13,12 +13,7 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-🟢 ✳ P 96%  · W 40%      ← menu bar: privacy light + the current session
-────────────────────────
-🔒 Org can't read your sessions
-   claude_team · team_tier_1 · Acme · admin
-   plan confirmed 2h ago
-   no org policy file on this machine
+✳ P 96%  · W 40%         ← menu bar (always the current session)
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -43,9 +38,9 @@ Accounts
   session percentage; a higher weekly or Opus number never takes its place. Open the
   dropdown for the weekly cap, per-model caps, and extra-usage credits, where each
   account's status dot still turns red if *any* of its windows is near the ceiling.
-- **Org privacy light** — a dot that answers one question at a glance: *can my
-  employer read my Claude Code sessions right now?* Green for no, red the moment
-  the ground shifts. See [Session privacy](#session-privacy).
+- **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
+  admins may be able to read your Claude Code sessions), you get one macOS
+  notification. Nothing else about it shows anywhere.
 - **Pure Python 3** — no pip installs, no build step.
 - **Private** — your token is stored locally and sent only to `api.anthropic.com`
   over HTTPS. Nothing goes to any third party.
@@ -132,63 +127,27 @@ The refresh cadence is the `.5m.` in the filename (every 5 min); results are cac
 > tools, but Anthropic could change them. If numbers or sign-in break, that's the
 > first thing to check. See [SECURITY.md](SECURITY.md).
 
-## Session privacy
+## Plan-change notice
 
-The dot to the left of your usage answers one question: **can my employer read my
-Claude Code sessions right now?**
+Claude Code sessions on a **Team** plan can't be read by org admins; on **Enterprise**
+with the Compliance API enabled, they can — from the day it's switched on, not
+retroactively. So the widget watches one field, `oauthAccount.organizationType` in
+`~/.claude.json` (the server keeps it current), and posts a single macOS notification
+the moment it moves off `claude_team`. Nothing shows in the menu bar or the dropdown.
 
-Claude Code keeps session transcripts on the machine, and each session is recorded
-server-side as its API requests land. On a **Team** plan an org admin can see usage
-volume only. On an **Enterprise** plan with the Compliance API enabled, its local
-session endpoints return full transcripts — prompts, responses, tool calls and tool
-results — to org compliance reviewers. Capture starts when the org switches it on and
-is **not retroactive**, so the moment of the switch is the thing worth catching.
+The string an Enterprise org reports isn't known, so it doesn't look for one: any move
+off Team counts, and the notification quotes exactly what it read. A file it can't read
+is skipped rather than reported. The last value seen lives in
+`~/.config/claude-usage-meter/plan-state.json`.
 
-Two independent signals feed the light:
+The notification comes from SwiftBar (or Script Editor, without SwiftBar). To check
+that macOS will actually show it, run this once:
 
-1. **The plan on this login** — `oauthAccount.organizationType` and `seatTier` from
-   `~/.claude.json`, which the server refreshes on its own.
-2. **Policy pushed onto the machine** — a managed settings file
-   (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
-   `/etc/claude-code/managed-settings.json` on Linux/WSL) can switch on OpenTelemetry
-   prompt logging, sending prompt and response text to a collector the org runs. That
-   works on **any** plan, Team included, and the plan field doesn't move when it
-   happens — so it's watched separately. The same variables are checked in your own
-   environment and `~/.claude/settings*.json`.
-
-| Light | When | Meaning |
-| --- | --- | --- |
-| 🟢 | plan matches the baseline, no policy file, no logging switched on | Org can't read session content |
-| 🟡 | `~/.claude.json` unreadable, no `oauthAccount`, or the plan hasn't been re-confirmed in 7 days | Unknown — never reported as fine |
-| 🔴 | plan differs from the baseline, **or** a policy file exists, **or** any logging variable is on | Readable, or the ground has shifted |
-
-Red always says which of the three tripped it and shows the observed value. The last
-transition is remembered in `~/.config/claude-usage-meter/privacy-state.json`, so it
-reports *"changed 2h ago: organizationType claude_team → …"* rather than just a value.
-
-Two things it deliberately does **not** do: it never matches against a guessed
-Enterprise string (a check written against a constant nobody has confirmed would ship
-looking correct and silently never fire), and it never treats a failed read as good
-news — anything it can't determine is amber.
-
-### Privacy config
-
-```json
-{
-  "privacy_indicator": "always",
-  "privacy_baseline": { "organizationType": "claude_team", "seatTier": "team_tier_1" }
-}
+```bash
+python3 "$(defaults read com.ameba.SwiftBar PluginDirectory)/claude-usage.5m.py" notify-test
 ```
 
-| key                 | what it does                                                          |
-| ------------------- | --------------------------------------------------------------------- |
-| `privacy_indicator` | menu-bar dot: `always` (default), `alert` (only when not green), `off` |
-| `privacy_baseline`  | the plan this machine is known-good on — anything else is a finding    |
-
-The shipped baseline is **Team**. On a Pro or Max login the light starts red with your
-actual plan shown next to it — set `privacy_baseline` to those observed values once
-and it goes green. The dropdown section is always there, whatever `privacy_indicator`
-says; the setting only governs the dot.
+No banner? Allow notifications for that app in System Settings → Notifications.
 
 ## Advanced: use an existing Claude Code login instead
 

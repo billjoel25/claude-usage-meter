@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -29,47 +30,28 @@ m = load()
 
 
 def _isolate(tmp):
-    """Point the module's filesystem paths at a throwaway dir — including the ones
-    the privacy check reads, so no test depends on the machine it runs on."""
+    """Point the module's filesystem paths at a throwaway dir — including the
+    ~/.claude.json the plan watcher reads, so no test depends on this machine."""
     m.APP_DIR = tmp
     m.CACHE_DIR = os.path.join(tmp, "cache")
     m.ACCOUNTS_DIR = os.path.join(tmp, "accounts")
     m.config_candidates = lambda: [os.path.join(tmp, "config.json")]
     m.config_path = lambda: os.path.join(tmp, "config.json")
     m.CLAUDE_JSON = os.path.join(tmp, "claude.json")
-    m.MANAGED_SETTINGS = (os.path.join(tmp, "managed-settings.json"),)
-    m.USER_SETTINGS = (os.path.join(tmp, "settings.json"),)
-    for var in m.OTEL_VARS + (m.OTEL_ENDPOINT,):
-        os.environ.pop(var, None)
 
 
-def _profile(**over):
-    """A ~/.claude.json payload on the known-good baseline, overridable per test."""
-    acct = {"organizationType": "claude_team", "seatTier": "team_tier_1",
-            "organizationName": "Learnyst", "organizationRole": "admin",
-            "profileFetchedAt": int(time.time() * 1000)}
-    acct.update(over)
-    return {"oauthAccount": acct}
-
-
-def _write_profile(**over):
-    json.dump(_profile(**over), open(m.CLAUDE_JSON, "w"))
-
-
-DOTS = ("🟢", "🟡", "🔴", "⚪")
-
-
-def _dot_of(out):
-    """The privacy dot on the menu-bar line, or '' when it isn't showing one."""
-    text = out.splitlines()[0].split(" | ", 1)[0]
-    return text[0] if text[:1] in DOTS else ""
+def _write_profile(org="claude_team"):
+    """A ~/.claude.json whose oauthAccount reports `org` (None leaves it out)."""
+    acct = {"seatTier": "team_tier_1", "organizationName": "Learnyst"}
+    if org is not None:
+        acct["organizationType"] = org
+    json.dump({"oauthAccount": acct}, open(m.CLAUDE_JSON, "w"))
 
 
 def _title_of(out):
-    """The menu-bar text: first line, minus its ` | key=value` params (which carry
-    the base64 icon) and minus the privacy dot, which has its own accessor."""
-    text = out.splitlines()[0].split(" | ", 1)[0]
-    return text[1:] if _dot_of(out) else text
+    """The menu-bar text of a rendered dropdown — the first line, minus its
+    ` | key=value` params (which carry the base64 icon)."""
+    return out.splitlines()[0].split(" | ", 1)[0]
 
 
 def _render_main(data, label="personal", extra=()):
@@ -709,227 +691,160 @@ def test_windows_reset_detection():
     assert not m._windows_reset(None, time.time())
 
 
-# --------------------------------------------- session privacy (org visibility)
+# --------------------------------------------------- plan-change notification
 
-def test_privacy_green_on_the_known_baseline():
-    _isolate(tempfile.mkdtemp())
-    _write_profile()
-    st = m.safe_privacy_state()
-    assert st["level"] == "green", st
-    assert st["reasons"] == []
-    # the observed values are shown even when everything is fine
-    assert any("claude_team · team_tier_1" in f for f in st["facts"]), st["facts"]
-    assert any("Learnyst" in f for f in st["facts"]), st["facts"]
-
-
-def test_privacy_red_on_anything_but_the_baseline_org_type():
-    """The Enterprise string is unknown, so the rule is baseline-and-diff: every one
-    of these fires, including empty and missing, and each shows what was seen."""
-    for value in ("claude_enterprise", "enterprise", "", None, "CLAUDE_TEAM", 0):
-        _isolate(tempfile.mkdtemp())
-        _write_profile(organizationType=value)
-        st = m.safe_privacy_state()
-        assert st["level"] == "red", (value, st["level"])
-        assert any("organizationType" in r for r in st["reasons"]), value
-        assert any(m._shown(value) in r for r in st["reasons"]), (value, st["reasons"])
-
-
-def test_privacy_red_on_seat_tier_move():
-    _isolate(tempfile.mkdtemp())
-    _write_profile(seatTier="enterprise_tier_2")
-    st = m.safe_privacy_state()
-    assert st["level"] == "red"
-    assert any("seatTier is enterprise_tier_2" in r for r in st["reasons"])
-    # red says which field moved — it doesn't blame the one that didn't
-    assert not any("organizationType" in r for r in st["reasons"]), st["reasons"]
-
-
-def test_privacy_amber_when_the_profile_cannot_be_read():
-    for setup in (lambda: None,
-                  lambda: open(m.CLAUDE_JSON, "w").write("{broken"),
-                  lambda: json.dump({"no_oauth_here": 1}, open(m.CLAUDE_JSON, "w"))):
-        _isolate(tempfile.mkdtemp())
-        setup()
-        st = m.safe_privacy_state()
-        assert st["level"] == "amber", st          # never green on missing data
-        assert st["reasons"], "an amber light with no reason is useless"
-
-
-def test_privacy_amber_on_a_stale_or_undated_profile():
-    _isolate(tempfile.mkdtemp())
-    _write_profile(profileFetchedAt=int((time.time() - 12 * 86400) * 1000))
-    st = m.safe_privacy_state()
-    assert st["level"] == "amber"
-    assert any("12 days" in r for r in st["reasons"]), st["reasons"]
-    _isolate(tempfile.mkdtemp())
-    _write_profile(profileFetchedAt=None)
-    assert m.safe_privacy_state()["level"] == "amber"
-    _isolate(tempfile.mkdtemp())
-    _write_profile()                               # a fresh profile is not stale
-    assert m.safe_privacy_state()["level"] == "green"
-
-
-def test_privacy_red_outranks_amber():
-    """An off-baseline org that is *also* stale is red — a real finding must never
-    be softened into 'unknown'."""
-    _isolate(tempfile.mkdtemp())
-    _write_profile(organizationType="claude_enterprise",
-                   profileFetchedAt=int((time.time() - 30 * 86400) * 1000))
-    assert m.safe_privacy_state()["level"] == "red"
-
-
-def test_privacy_red_on_org_pushed_policy():
-    _isolate(tempfile.mkdtemp())
-    _write_profile()
-    json.dump({"env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-                       "OTEL_LOG_USER_PROMPTS": "true",
-                       "OTEL_LOG_TOOL_CONTENT": "0",
-                       "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel.corp.example:4317"}},
-              open(m.MANAGED_SETTINGS[0], "w"))
-    st = m.safe_privacy_state()
-    assert st["level"] == "red"
-    joined = " | ".join(st["reasons"])
-    assert "managed-settings.json" in joined
-    assert "CLAUDE_CODE_ENABLE_TELEMETRY=1" in joined and "OTEL_LOG_USER_PROMPTS=true" in joined
-    assert "OTEL_LOG_TOOL_CONTENT" not in joined          # explicitly off isn't a finding
-    assert "https://otel.corp.example:4317" in joined     # the collector is named
-
-
-def test_privacy_red_on_a_policy_file_that_will_not_parse():
-    """Its presence alone means the org is pushing policy here — still red."""
-    _isolate(tempfile.mkdtemp())
-    _write_profile()
-    open(m.MANAGED_SETTINGS[0], "w").write("{broken")
-    assert m.safe_privacy_state()["level"] == "red"
-
-
-def test_privacy_red_on_locally_set_logging():
-    _isolate(tempfile.mkdtemp())
-    _write_profile()
-    json.dump({"env": {"OTEL_LOG_ASSISTANT_RESPONSES": "1"}}, open(m.USER_SETTINGS[0], "w"))
-    st = m.safe_privacy_state()
-    assert st["level"] == "red"
-    assert any("OTEL_LOG_ASSISTANT_RESPONSES=1" in r for r in st["reasons"]), st["reasons"]
-
-    _isolate(tempfile.mkdtemp())
-    _write_profile()
-    os.environ["OTEL_LOG_USER_PROMPTS"] = "1"
+def _watch(sent):
+    """watch_plan() with notify() swapped for a recorder."""
+    saved = m.notify
+    m.notify = lambda title, body: sent.append((title, body)) or "SwiftBar"
     try:
-        st = m.safe_privacy_state()
-        assert st["level"] == "red"
-        assert any("environment" in r for r in st["reasons"]), st["reasons"]
+        return m.watch_plan()
     finally:
-        os.environ.pop("OTEL_LOG_USER_PROMPTS", None)
+        m.notify = saved
 
 
-def test_privacy_switch_truthiness():
-    for on in ("1", "true", "TRUE", " yes ", "on", True):
-        assert m._truthy(on), on
-    for off in ("0", "false", "no", "off", "", None, False, "maybe"):
-        assert not m._truthy(off), off
-
-
-def test_privacy_transition_reports_the_move_not_the_value():
+def test_plan_first_run_records_quietly():
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    assert m.safe_privacy_state()["change"] is None      # first sighting is a value
-    _write_profile(organizationType="claude_enterprise")
-    st = m.safe_privacy_state()
-    assert st["change"]["from"]["organizationType"] == "claude_team"
-    assert m._change_summary(st["change"], st["snapshot"]) == \
-        "organizationType claude_team → claude_enterprise"
-    assert any("changed" in ln for ln in m.privacy_lines(st)), m.privacy_lines(st)
-    # the move keeps being reported on later ticks, not only the one it happened on
-    assert m.safe_privacy_state()["change"]["from"]["organizationType"] == "claude_team"
+    _write_profile("claude_team")
+    sent = []
+    assert _watch(sent) is None and sent == []
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
 
 
-def test_privacy_transition_survives_a_transient_unreadable_profile():
-    """A read failure must not masquerade as 'your org changed'."""
+def test_plan_notifies_once_when_the_org_leaves_team():
+    """The one thing asked for. The Enterprise string isn't known, so any move off
+    claude_team counts — and the notification quotes what it actually read."""
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    m.safe_privacy_state()
-    os.remove(m.CLAUDE_JSON)
-    st = m.safe_privacy_state()
-    assert st["level"] == "amber"
-    assert st["change"] is None, st["change"]
-    _write_profile()                                     # and back again
-    assert m.safe_privacy_state()["change"] is None
+    _write_profile("claude_team")
+    sent = []
+    _watch(sent)
+    _write_profile("claude_enterprise")
+    _watch(sent)
+    assert len(sent) == 1, sent
+    assert "claude_enterprise" in sent[0][1] and "Team" in sent[0][1], sent
+    _watch(sent)                                  # later ticks, same value: silent
+    _watch(sent)
+    assert len(sent) == 1, sent
 
 
-def test_privacy_transition_catches_a_policy_file_appearing():
+def test_plan_says_nothing_when_it_cannot_read():
+    """Unreadable is not a change — and must not overwrite what was last seen, or
+    the real move afterwards would slip by unannounced."""
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    m.safe_privacy_state()
-    json.dump({"env": {}}, open(m.MANAGED_SETTINGS[0], "w"))
-    st = m.safe_privacy_state()
-    assert "org policy file appeared" in m._change_summary(st["change"], st["snapshot"])
+    _write_profile("claude_team")
+    sent = []
+    _watch(sent)
+    for broken in (lambda: os.remove(m.CLAUDE_JSON),
+                   lambda: open(m.CLAUDE_JSON, "w").write("{broken"),
+                   lambda: json.dump({"other": 1}, open(m.CLAUDE_JSON, "w")),
+                   lambda: _write_profile(None),
+                   lambda: _write_profile("")):
+        broken()
+        assert _watch(sent) is None
+    assert sent == []
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
+    _write_profile("claude_enterprise")           # …so the real move still lands
+    _watch(sent)
+    assert len(sent) == 1, sent
 
 
-def test_privacy_baseline_override_for_a_non_team_login():
-    tmp = tempfile.mkdtemp()
-    _isolate(tmp)
-    _write_profile(organizationType="claude_max", seatTier="max_tier_1")
-    assert m.safe_privacy_state()["level"] == "red"       # not the shipped baseline
-    json.dump({"privacy_baseline": {"organizationType": "claude_max",
-                                    "seatTier": "max_tier_1"}},
-              open(os.path.join(tmp, "config.json"), "w"))
-    assert m.safe_privacy_state()["level"] == "green"
-
-
-def test_privacy_never_raises_and_fails_to_amber():
+def test_plan_no_noise_except_leaving_team():
+    """Returning to Team, or moving between other plans, isn't the event."""
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    saved = m._profile
-    m._profile = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    sent = []
+    for org in ("claude_max", "claude_pro", "claude_team", "claude_team"):
+        _write_profile(org)
+        _watch(sent)
+    assert sent == [], sent
+    _write_profile("claude_enterprise")           # leaving Team again is
+    _watch(sent)
+    assert len(sent) == 1, sent
+
+
+def test_plan_survives_a_corrupt_state_file():
+    _isolate(tempfile.mkdtemp())
+    os.makedirs(m.APP_DIR, exist_ok=True)
+    open(m.plan_state_path(), "w").write("[1, 2")
+    _write_profile("claude_team")
+    sent = []
+    assert _watch(sent) is None and sent == []    # treated as a first run
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
+
+
+def test_notify_is_a_no_op_off_macos():
+    saved = (sys.platform, m.subprocess.run)
+    calls = []
+    m.subprocess.run = lambda *a, **k: calls.append(a)
+    sys.platform = "linux"
     try:
-        st = m.safe_privacy_state()
+        assert m.notify("t", "b") is None
     finally:
-        m._profile = saved
-    assert st["level"] == "amber"                         # never green
-    assert any("RuntimeError" in r for r in st["reasons"]), st["reasons"]
+        sys.platform, m.subprocess.run = saved
+    assert calls == []
 
 
-def test_privacy_dot_modes():
-    tmp = tempfile.mkdtemp()
-    _isolate(tmp)
-    green, red = {"level": "green"}, {"level": "red"}
-    assert m.privacy_dot(green, "always") == "🟢 "
-    assert m.privacy_dot(red, "always") == "🔴 "
-    assert m.privacy_dot(green, "alert") == ""            # quiet while it's fine
-    assert m.privacy_dot(red, "alert") == "🔴 "            # never quiet when it isn't
-    assert m.privacy_dot(red, "off") == ""
-    assert m.privacy_mode() == "always"                   # default with no config
-    cfg = os.path.join(tmp, "config.json")
-    json.dump({"privacy_indicator": "alert"}, open(cfg, "w"))
-    assert m.privacy_mode() == "alert"
-    json.dump({"privacy_indicator": "nonsense"}, open(cfg, "w"))
-    assert m.privacy_mode() == "always"                   # unknown value falls back
+def test_notify_goes_through_swiftbar_by_file_name():
+    """SwiftBar finds a plugin by its file name, and doesn't decode '+' as a space —
+    so spaces must travel as %20 or the banner reads 'Your+org+is…'."""
+    saved = (sys.platform, m.subprocess.run, m._swiftbar_present, sys.argv,
+             os.environ.pop("SWIFTBAR_PLUGIN_PATH", None))
+    calls = []
+    m.subprocess.run = lambda cmd, **k: calls.append(cmd)
+    m._swiftbar_present = lambda: True
+    sys.platform = "darwin"
+    sys.argv = ["/Users/x/Library/Application Support/SwiftBar/Plugins/claude-usage.5m.py"]
+    try:
+        assert m.notify("Claude plan changed", "now “claude_enterprise” & more") == "SwiftBar"
+    finally:
+        sys.platform, m.subprocess.run, m._swiftbar_present, sys.argv = saved[:4]
+        if saved[4] is not None:
+            os.environ["SWIFTBAR_PLUGIN_PATH"] = saved[4]
+    cmd = calls[0]
+    assert cmd[:2] == ["/usr/bin/open", "-g"], cmd
+    url = cmd[2]
+    assert url.startswith("swiftbar://notify?") and "plugin=claude-usage.5m.py" in url, url
+    assert "+" not in url and "%20" in url, url
+    q = urllib.parse.parse_qs(url.split("?", 1)[1])
+    assert q["body"] == ["now “claude_enterprise” & more"], q     # round-trips intact
 
 
-def test_menu_bar_and_dropdown_carry_the_privacy_state():
+def test_notify_falls_back_to_osascript_without_swiftbar():
+    saved = (sys.platform, m.subprocess.run, m._swiftbar_present)
+    calls = []
+    m.subprocess.run = lambda cmd, **k: calls.append(cmd)
+    m._swiftbar_present = lambda: False
+    sys.platform = "darwin"
+    try:
+        assert m.notify('say "hi"', 'quote " and \\ backslash') == "Script Editor"
+    finally:
+        sys.platform, m.subprocess.run, m._swiftbar_present = saved
+    cmd = calls[0]
+    assert cmd[0] == "/usr/bin/osascript"
+    # title and body travel as argv — never spliced into the script's source
+    assert cmd[-2:] == ['say "hi"', 'quote " and \\ backslash'], cmd
+    assert not any('say "hi"' in part for part in cmd[:-2]), cmd
+
+
+def test_nothing_about_privacy_in_the_menu():
+    """No dot in the menu bar, no section in the dropdown — just usage."""
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    out = _render_main({"five_hour": {"utilization": 20}})
-    assert _dot_of(out) == "🟢", out.splitlines()[0][:20]
-    assert _title_of(out).strip() == "20%"                # usage number is untouched
-    assert any(m.PRIVACY_HEAD["green"] in ln for ln in out.splitlines())
-    _write_profile(organizationType="claude_enterprise")
-    out = _render_main({"five_hour": {"utilization": 20}})
-    assert _dot_of(out) == "🔴"
-    assert _title_of(out).strip() == "20%"
-    assert any("claude_enterprise" in ln for ln in out.splitlines())
+    _write_profile("claude_enterprise")
+    out = _render_main({"five_hour": {"utilization": 5}})
+    assert _title_of(out).strip() == "5%", _title_of(out)
+    for noise in ("🟢", "🟡", "🔴", "Org can", "org policy", "plan confirmed",
+                  "claude_team", "claude_enterprise", "Learnyst"):
+        assert noise not in out, noise
 
 
-def test_welcome_screen_carries_privacy_too():
-    """Not being signed into the meter doesn't make the question go away."""
+def test_main_survives_a_broken_watcher():
     _isolate(tempfile.mkdtemp())
-    _write_profile()
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        m._welcome(m.safe_privacy_state())
-    out = buf.getvalue()
-    assert _dot_of(out) == "🟢"
-    assert m.PRIVACY_HEAD["green"] in out
+    saved = m.watch_plan
+    m.watch_plan = lambda: 1 / 0
+    try:
+        out = _render_main({"five_hour": {"utilization": 5}})
+    finally:
+        m.watch_plan = saved
+    assert _title_of(out).strip() == "5%"
 
 
 # ------------------------------------------------------------------- runner

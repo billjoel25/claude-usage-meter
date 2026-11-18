@@ -18,9 +18,8 @@
 #                any per-model weekly caps, and extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
 #
-# Beside the number sits a privacy light: green while your org can't read your Claude
-# Code sessions, red when the plan moves off its baseline or policy lands on the
-# machine, amber when that can't be determined. See "session privacy" below.
+# If your Claude org ever moves off Team (to Enterprise, say), you get one macOS
+# notification. Nothing else about it shows. See "plan-change notice" below.
 #
 # Sign in from the menu ("Add Claude account") — no Claude Code CLI needed.
 # Multiple accounts are supported; tokens are stored locally and auto-refreshed.
@@ -294,307 +293,93 @@ def do_move_account():
         _write_display(entries)
 
 
-# ------------------------------------------------------- session privacy (org)
-# One question: can my employer read my Claude Code sessions right now?
+# ------------------------------------------------------------ plan-change notice
+# One job: a single macOS notification if your Claude org ever moves off Team.
+# Enterprise is where org admins can gain access to your Claude Code session
+# transcripts (through the Compliance API), so that move is worth hearing about.
+# Nothing shows in the menu bar or the dropdown; you hear from this exactly when it
+# happens, and never otherwise.
 #
-# Two independent signals, either of which turns this red:
-#   1. The plan on this login. A Team org admin sees usage volume only. An
-#      Enterprise org with the Compliance API enabled can pull whole local session
-#      transcripts — prompts, responses, tool calls and tool results. Capture
-#      starts when the org switches it on and is not retroactive, so the moment of
-#      the switch is the thing worth catching.
-#   2. Policy pushed onto the machine. A managed settings file can turn on
-#      OpenTelemetry prompt logging, shipping prompt and response text to a
-#      collector the org runs. That works on *any* plan, Team included, and the
-#      plan field does not move when it happens — so it is watched separately.
-#
-# The organizationType string an Enterprise org reports is NOT known, and a check
-# written against a guessed constant would ship looking correct and silently never
-# fire. So this holds a known-good baseline and alerts on anything else — including
-# missing, null or empty — showing the observed value so a surprise reads as a fact
-# rather than just an alarm.
-#
-# Everything here fails to amber, never to green: a read that throws, a file that
-# won't parse, a key that isn't there — that is "unknown", not "fine".
+# The organizationType an Enterprise org reports isn't known, so this doesn't match
+# a guessed string. It remembers the last value it read from ~/.claude.json and
+# speaks up when "claude_team" turns into anything else, quoting what it now reads.
+# A file it can't read is skipped — never reported as a change.
 
 CLAUDE_JSON = "~/.claude.json"
-MANAGED_SETTINGS = (
-    "/Library/Application Support/ClaudeCode/managed-settings.json",   # macOS
-    "/etc/claude-code/managed-settings.json",                          # Linux / WSL
-)
-USER_SETTINGS = ("~/.claude/settings.json", "~/.claude/settings.local.json")
-# The plan this machine is known to be on. Anything else is a finding, not a value.
-# `privacy_baseline` in the config overrides it for a login that isn't Team.
-PRIVACY_BASELINE = {"organizationType": "claude_team", "seatTier": "team_tier_1"}
-# Switches that put prompt or response text on the wire. The first two together are
-# the serious pair: telemetry on plus prompt logging on means full prompt text is
-# leaving the machine for whatever OTEL_EXPORTER_OTLP_ENDPOINT names.
-OTEL_VARS = ("CLAUDE_CODE_ENABLE_TELEMETRY", "OTEL_LOG_USER_PROMPTS",
-             "OTEL_LOG_ASSISTANT_RESPONSES", "OTEL_LOG_TOOL_DETAILS",
-             "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES")
-OTEL_ENDPOINT = "OTEL_EXPORTER_OTLP_ENDPOINT"
-PROFILE_STALE_DAYS = 7          # a plan not re-confirmed for this long is "unknown"
-PRIVACY_MODES = ("always", "alert", "off")
-PRIVACY_DEFAULT = "always"
-PRIVACY_HEAD = {
-    "green": "Org can’t read your sessions",
-    "amber": "Session privacy unknown",
-    "red":   "Org may be able to read your sessions",
-}
-PRIVACY_SFIMAGE = {"green": "lock.fill", "amber": "questionmark.circle.fill",
-                   "red": "lock.open.fill"}
+TEAM = "claude_team"
 
 
-def privacy_state_path():
-    return os.path.join(APP_DIR, "privacy-state.json")
+def plan_state_path():
+    return os.path.join(APP_DIR, "plan-state.json")
 
 
-def privacy_mode():
-    """Menu-bar behaviour for the dot — `privacy_indicator` in the config file:
-    'always' (default), 'alert' (only when it isn't green), or 'off'. The dropdown
-    section is there either way."""
-    v = _read_config().get("privacy_indicator")
-    return v if v in PRIVACY_MODES else PRIVACY_DEFAULT
-
-
-def _privacy_baseline():
-    cfg = _read_config().get("privacy_baseline")
-    if isinstance(cfg, dict):
-        return {k: cfg.get(k, v) for k, v in PRIVACY_BASELINE.items()}
-    return dict(PRIVACY_BASELINE)
-
-
-def _read_json_file(path):
-    """Parsed JSON object at `path` (~ expanded), or None if missing or unusable."""
+def _org_type():
+    """oauthAccount.organizationType from ~/.claude.json, or None if unreadable."""
     try:
-        with open(os.path.expanduser(path)) as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else None
+        with open(os.path.expanduser(CLAUDE_JSON)) as fh:
+            acct = json.load(fh).get("oauthAccount")
+        v = acct.get("organizationType") if isinstance(acct, dict) else None
+        return v if isinstance(v, str) and v else None
     except Exception:
         return None
 
 
-def _truthy(v):
-    """Is an env-style switch on? Unset, or explicitly off, is not."""
-    if isinstance(v, bool):
-        return v
-    return str(v).strip().lower() in ("1", "true", "yes", "on")
+def _swiftbar_present():
+    return bool(os.environ.get("SWIFTBAR")) or any(
+        os.path.isdir(p) for p in ("/Applications/SwiftBar.app",
+                                   os.path.expanduser("~/Applications/SwiftBar.app")))
 
 
-def _worse(a, b):
-    rank = {"green": 0, "amber": 1, "red": 2}
-    return a if rank[a] >= rank[b] else b
+def notify(title, body):
+    """Post one macOS notification. Goes through SwiftBar's own notify scheme where
+    SwiftBar is installed, so it arrives from SwiftBar; otherwise through osascript.
+    Returns the app it was sent as ('SwiftBar' / 'Script Editor'), or None if no
+    notifier ran. Sent is not the same as shown — `notify-test` checks that."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        if _swiftbar_present():
+            # SwiftBar addresses a plugin by its file name, e.g. claude-usage.5m.py
+            plugin = os.path.basename(os.environ.get("SWIFTBAR_PLUGIN_PATH") or sys.argv[0])
+            q = urllib.parse.urlencode({"plugin": plugin, "title": title, "body": body},
+                                       quote_via=urllib.parse.quote)   # %20, never '+'
+            cmd, via = ["/usr/bin/open", "-g", f"swiftbar://notify?{q}"], "SwiftBar"
+        else:
+            cmd = ["/usr/bin/osascript", "-e", "on run argv", "-e",
+                   "display notification (item 2 of argv) with title (item 1 of argv)",
+                   "-e", "end run", title, body]   # passed as argv: nothing to escape
+            via = "Script Editor"
+        subprocess.run(cmd, timeout=8, capture_output=True)
+        return via
+    except Exception:
+        return None
 
 
-def _shown(v):
-    """Print a blank value so it reads as a finding rather than a gap."""
-    return "(missing)" if v in (None, "") else str(v)
-
-
-def _ago(sec):
-    mins = int(sec // 60)
-    if mins < 60:
-        return f"{mins}m ago"
-    hrs = mins // 60
-    if hrs < 48:
-        return f"{hrs}h ago"
-    return f"{hrs // 24}d ago"
-
-
-def _profile():
-    """(oauthAccount dict, None) from ~/.claude.json, else (None, why-not)."""
-    data = _read_json_file(CLAUDE_JSON)
-    if data is None:
-        return None, f"can’t read {CLAUDE_JSON}"
-    acct = data.get("oauthAccount")
-    if not isinstance(acct, dict):
-        return None, f"no oauthAccount block in {CLAUDE_JSON}"
-    return acct, None
-
-
-def _profile_age(prof):
-    """Seconds since the server last refreshed the profile, or None if unrecorded."""
-    ms = _to_ms(prof.get("profileFetchedAt"))
-    return None if not ms else max(0.0, time.time() - ms / 1000)
-
-
-def _otel_on(env, source):
-    """[(var, value, source)] for the logging switches that are on in `env`."""
-    if not isinstance(env, dict):
-        return []
-    return [(k, str(env.get(k)), source) for k in OTEL_VARS if _truthy(env.get(k))]
-
-
-def _endpoint(env):
-    v = env.get(OTEL_ENDPOINT) if isinstance(env, dict) else None
-    return str(v) if v else None
-
-
-def _local_otel():
-    """Logging switched on outside org policy — this process's environment and the
-    user's own settings files. Same variables, same consequence.
-
-    os.environ is os._Environ, not a dict, so it is copied: handing it straight to
-    the isinstance check below would make this whole signal silently never fire."""
-    found = _otel_on(dict(os.environ), "environment")
-    for p in USER_SETTINGS:
-        found += _otel_on((_read_json_file(p) or {}).get("env"), p)
-    return found
-
-
-def _privacy_transition(snapshot, plan_known):
-    """Persist `snapshot` and return the last change as {'when', 'from'}, or None.
-    When the plan fields couldn't be read this run their previous values are carried
-    forward, so a transient unreadable file doesn't masquerade as a change."""
-    prev = _read_json_file(privacy_state_path()) or {}
-    last = prev.get("snapshot")
-    if not plan_known and isinstance(last, dict):
-        snapshot = dict(snapshot)
-        for k in ("organizationType", "seatTier"):
-            snapshot[k] = last.get(k)
-    if last == snapshot:
-        return prev.get("change")          # unchanged: keep reporting the last move
-    change = None
-    if isinstance(last, dict):             # first run records a value, not a change
-        change = {"when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  "from": last}
+def watch_plan():
+    """Run once per tick. Notifies when organizationType moves off claude_team, and
+    returns the message it sent — or None. Never raises."""
+    seen = _org_type()
+    if seen is None:
+        return None                     # can't read it: say nothing, remember nothing
+    try:
+        with open(plan_state_path()) as fh:
+            last = json.load(fh).get("organizationType")
+    except Exception:
+        last = None                     # first run, or a state file we can't use
+    if seen == last:
+        return None
+    sent = None
+    if last == TEAM:
+        sent = (f"Your org is no longer on Team — it now reads “{seen}”. On Enterprise, "
+                f"admins may be able to read your Claude Code sessions.")
+        notify("Claude plan changed", sent)
     try:
         os.makedirs(APP_DIR, exist_ok=True)
-        with open(privacy_state_path(), "w") as fh:
-            json.dump({"snapshot": snapshot, "change": change}, fh, indent=2)
+        with open(plan_state_path(), "w") as fh:
+            json.dump({"organizationType": seen}, fh)
     except Exception:
-        pass          # non-fatal; we only lose transition reporting for this run
-    return change
-
-
-def privacy_state():
-    """Can the org read your Claude Code sessions right now?
-
-    Returns {level, reasons, facts, snapshot, change}: `level` is green/amber/red,
-    `reasons` say what tripped a non-green, `facts` are the observed values worth
-    showing either way, and `change` describes the last time any of it moved."""
-    level, reasons, facts = "green", [], []
-    baseline = _privacy_baseline()
-
-    # ---- signal 1: the plan on this login ----
-    prof, why = _profile()
-    org = seat = None
-    if prof is None:
-        level = _worse(level, "amber")
-        reasons.append(why)
-    else:
-        org, seat = prof.get("organizationType"), prof.get("seatTier")
-        who = " · ".join(str(x) for x in (prof.get("organizationName"),
-                                          prof.get("organizationRole")) if x)
-        facts.append(f"{_shown(org)} · {_shown(seat)}" + (f" · {who}" if who else ""))
-        if org != baseline["organizationType"]:
-            level = "red"
-            reasons.append(f"organizationType is {_shown(org)}, "
-                           f"not {baseline['organizationType']}")
-        if seat != baseline["seatTier"]:
-            level = "red"
-            reasons.append(f"seatTier is {_shown(seat)}, not {baseline['seatTier']}")
-        age = _profile_age(prof)
-        if age is None:
-            level = _worse(level, "amber")
-            reasons.append("plan last confirmed: unknown (no profileFetchedAt)")
-        elif age > PROFILE_STALE_DAYS * 86400:
-            level = _worse(level, "amber")
-            reasons.append(f"plan not re-confirmed for {int(age // 86400)} days")
-        else:
-            facts.append(f"plan confirmed {_ago(age)}")
-
-    # ---- signal 2: policy pushed onto this machine ----
-    endpoints, managed = [], []
-    for p in MANAGED_SETTINGS:
-        if not os.path.exists(p):
-            continue
-        managed.append(p)
-        level = "red"
-        reasons.append(f"org policy file on this machine — {p}")
-        env = (_read_json_file(p) or {}).get("env")
-        on = _otel_on(env, p)
-        if on:
-            reasons.append("it turns on " + ", ".join(f"{k}={v}" for k, v, _ in on))
-        if _endpoint(env):
-            endpoints.append(_endpoint(env))
-
-    # ---- the same switches, set locally rather than by the org ----
-    local = _local_otel()
-    for var, val, src in local:
-        level = "red"
-        reasons.append(f"{var}={val} in {src}")
-    if local:
-        for env in [dict(os.environ)] + [(_read_json_file(p) or {}).get("env") or {}
-                                         for p in USER_SETTINGS]:
-            if _endpoint(env):
-                endpoints.append(_endpoint(env))
-    for ep in dict.fromkeys(endpoints):
-        reasons.append(f"prompt text would go to {ep}")
-    if not managed:
-        facts.append("no org policy file on this machine")
-
-    snapshot = {"organizationType": org, "seatTier": seat, "managed": managed,
-                "otel": sorted({v for v, _, _ in local})}
-    return {"level": level, "reasons": reasons, "facts": facts, "snapshot": snapshot,
-            "change": _privacy_transition(snapshot, prof is not None)}
-
-
-def safe_privacy_state():
-    """privacy_state() with the last-resort guard: an unforeseen failure is amber,
-    never green, and never takes the rest of the widget down with it."""
-    try:
-        return privacy_state()
-    except Exception as e:
-        return {"level": "amber", "facts": [], "snapshot": {}, "change": None,
-                "reasons": [f"privacy check failed — {type(e).__name__}"]}
-
-
-def _change_summary(change, now):
-    """'organizationType claude_team → …' for the last transition, or ''."""
-    was = change.get("from") if isinstance(change, dict) else None
-    if not isinstance(was, dict):
-        return ""
-    bits = []
-    for k in ("organizationType", "seatTier"):
-        if was.get(k) != now.get(k):
-            bits.append(f"{k} {_shown(was.get(k))} → {_shown(now.get(k))}")
-    if bool(was.get("managed")) != bool(now.get("managed")):
-        bits.append("org policy file " + ("appeared" if now.get("managed") else "removed"))
-    if was.get("otel") != now.get("otel"):
-        bits.append("prompt logging " + ("switched on" if now.get("otel") else "switched off"))
-    return "; ".join(bits)
-
-
-def privacy_lines(state):
-    """Dropdown lines: the verdict, then exactly what it rests on."""
-    level = state["level"]
-    lines = [f"{PRIVACY_HEAD[level]} | sfimage={PRIVACY_SFIMAGE[level]} "
-             f"sfcolor={sf(level)} font=Menlo-Bold size=13 trim=false"]
-    for r in state["reasons"]:
-        lines.append(f"  {r} | font=Menlo size=12 trim=false color={color_param(level)}")
-    for f in state["facts"]:
-        lines.append(f"  {f} | font=Menlo size=12 trim=false color={color_param('dim')}")
-    change = state.get("change")
-    summary = _change_summary(change, state.get("snapshot") or {})
-    if summary:
-        when = ""
-        try:
-            t = datetime.fromisoformat(str(change["when"]).replace("Z", "+00:00"))
-            when = " " + _ago((datetime.now(timezone.utc) - t).total_seconds())
-        except Exception:
-            pass
-        lines.append(f"  changed{when}: {summary} "
-                     f"| font=Menlo size=12 trim=false color={color_param('amber')}")
-    return lines
-
-
-def privacy_dot(state, mode=None):
-    """The menu-bar dot, or '' when the mode says stay quiet."""
-    mode = privacy_mode() if mode is None else mode
-    if mode == "off" or (mode == "alert" and state["level"] == "green"):
-        return ""
-    return DOT[state["level"]] + " "
+        pass
+    return sent
 
 
 # ------------------------------------------------------------------------ credentials
@@ -1260,14 +1045,10 @@ def _footer(accounts=(), prefs=()):
     print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
 
 
-def _welcome(priv):
-    print(f"{privacy_dot(priv)}Claude | templateImage={CLAUDE_ICON} size=11 "
-          f"color={color_param('dim')}")
+def _welcome():
+    print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
     print("---")
     print(f"Claude plan usage | size=12 color={color_param('dim')}")
-    print("---")
-    for ln in privacy_lines(priv):
-        print(ln)
     print("---")
     print("Not signed in yet | font=Menlo-Bold size=13 trim=false")
     print(f"Add your Claude account below to see your current session usage. "
@@ -1278,7 +1059,10 @@ def _welcome(priv):
 
 def main():
     _ensure_config()
-    priv = safe_privacy_state()     # machine-wide, so it stands apart from accounts
+    try:
+        watch_plan()                # silent unless the org moves off Team
+    except Exception:
+        pass                        # never let the watcher take the widget down
     prefs = _display_prefs()
     hidden = hidden_labels(prefs)
     accounts = order_accounts(load_accounts(), prefs)
@@ -1294,7 +1078,7 @@ def main():
     have_data = any(res["ok"] and res["data"] for _, res, _, _ in rendered)
     explicit = bool(_app_accounts()) or bool(_manual_accounts())
     if not have_data and not explicit:
-        _welcome(priv)
+        _welcome()
         return
 
     # ---- menu bar title: the current session (rolling 5-hour) window, in the user's
@@ -1309,21 +1093,17 @@ def main():
             label = acct.get("label", "?")
             shown.append((label[0].upper() if label else "?", text))
 
-    dot = privacy_dot(priv)
     if not shown:
         # configured, but nothing readable yet — stay quiet and subtle
-        print(f"{dot}Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+        print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
     else:
         text = shown[0][1] if len(shown) == 1 else " · ".join(f"{i} {p}" for i, p in shown)
         # white Claude logo (template image) + white numbers (native color), 20% smaller
-        print(f"{dot}{text} | templateImage={CLAUDE_ICON} size=11")
+        print(f"{text} | templateImage={CLAUDE_ICON} size=11")
 
     print("---")
     print(f"Claude plan usage  ·  updated {datetime.now().strftime('%H:%M')} "
           f"| size=12 color={color_param('dim')}")
-    print("---")
-    for ln in privacy_lines(priv):
-        print(ln)
     print("---")
 
     for acct, res, lines, worst in rendered:
@@ -1337,6 +1117,12 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "notify-test":
+        via = notify("Claude plan changed (test)",
+                     "This is how you'll hear if your org ever moves off Team.")
+        print(f"Sent as {via}. If nothing appeared, allow notifications for {via} in "
+              f"System Settings → Notifications." if via else "Notifications need macOS.")
         raise SystemExit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "toggle-account":
         do_toggle_account()
