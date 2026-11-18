@@ -8,6 +8,10 @@
 - Tokens are stored locally under `~/.config/claude-usage-meter/accounts/` with
   file permissions `600`. An auto-detected Claude Code login is read from the
   macOS Keychain or `~/.claude/.credentials.json` and is never copied elsewhere.
+- To notify you if your org moves off Team, it reads one field —
+  `oauthAccount.organizationType` — from `~/.claude.json`. Only that value is
+  kept (in `~/.config/claude-usage-meter/plan-state.json`), and it only ever
+  leaves the file as the text of a local macOS notification.
 - The widget makes no other network calls and has no telemetry.
 
 ## Unofficial endpoints — read this
