@@ -38,12 +38,17 @@ Accounts
   session percentage; a higher weekly or Opus number never takes its place. Open the
   dropdown for the weekly cap, per-model caps, and extra-usage credits, where each
   account's status dot still turns red if *any* of its windows is near the ceiling.
+- **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
+  admins may be able to read your Claude Code sessions), you get one macOS
+  notification. Nothing else about it shows anywhere.
 - **Pure Python 3** — no pip installs, no build step.
 - **Private** — your token is stored locally and sent only to `api.anthropic.com`
   over HTTPS. Nothing goes to any third party.
-- Color turns amber → red as a window nears its limit; reset countdowns; per-model
-  weekly limits (`seven_day_opus` / `seven_day_sonnet`) and extra-usage credits when
-  your plan reports them.
+- Plain black text — no traffic-light colors on your usage, however close a window
+  gets. The percentage and its reset countdown say how near you are and when it
+  clears; color on top of that only added worry. (Want green/amber back? See
+  [Tuning](#tuning).) Per-model weekly limits (`seven_day_opus` / `seven_day_sonnet`)
+  and extra-usage credits appear when your plan reports them.
 
 ## Install
 
@@ -122,6 +127,28 @@ The refresh cadence is the `.5m.` in the filename (every 5 min); results are cac
 > tools, but Anthropic could change them. If numbers or sign-in break, that's the
 > first thing to check. See [SECURITY.md](SECURITY.md).
 
+## Plan-change notice
+
+Claude Code sessions on a **Team** plan can't be read by org admins; on **Enterprise**
+with the Compliance API enabled, they can — from the day it's switched on, not
+retroactively. So the widget watches one field, `oauthAccount.organizationType` in
+`~/.claude.json` (the server keeps it current), and posts a single macOS notification
+the moment it moves off `claude_team`. Nothing shows in the menu bar or the dropdown.
+
+The string an Enterprise org reports isn't known, so it doesn't look for one: any move
+off Team counts, and the notification quotes exactly what it read. A file it can't read
+is skipped rather than reported. The last value seen lives in
+`~/.config/claude-usage-meter/plan-state.json`.
+
+The notification comes from SwiftBar (or Script Editor, without SwiftBar). To check
+that macOS will actually show it, run this once:
+
+```bash
+python3 "$(defaults read com.ameba.SwiftBar PluginDirectory)/claude-usage.5m.py" notify-test
+```
+
+No banner? Allow notifications for that app in System Settings → Notifications.
+
 ## Advanced: use an existing Claude Code login instead
 
 If you already use the **Claude Code CLI**, the widget auto-detects its login (macOS
@@ -186,20 +213,34 @@ The menu-bar number is always the current session (the rolling 5-hour window) �
 is nothing to configure. Earlier versions had a **Menu bar shows** selector backed by a
 `"menu_bar"` config key; both are gone, and a leftover `"menu_bar"` key is ignored.
 
+Usage rows are plain black (white in dark mode) by default. To color them by how full
+they are instead, set `"colors": "status"` in the config file — green below half,
+amber above it.
+
 For the rest, edit the constants near the top of `claude-usage.5m.py`:
 
-- `AMBER_AT` / `RED_AT` — the % thresholds for yellow/red.
+- `AMBER_AT` — in `status` colors, the % at which a window turns amber (default 50).
+- `RED_AT` — in `status` colors, off by default (`None`): nothing goes red. Set it
+  (e.g. `85`) for a red tier near the ceiling.
 - `CACHE_TTL` — cache lifetime in seconds (keep ≥ 180 to avoid 429s).
+- `STALE_MAX` — how long a cached reading may stand in for a live one when a fetch
+  fails (default 30 min). Past it the numbers are dropped and the cache file deleted.
 - Rename the file's `.5m.` segment to change the refresh interval.
 
 ## Troubleshooting
 
 - **"not logged in"** — click **➕ Add Claude account** and sign in.
 - **"sign-in expired"** — sign out and add the account again.
-- **"429 — rate limited"** — you're polling too hard; it recovers next tick.
+- **"429 — rate limited"** — you're polling too hard; it recovers next tick. The
+  cached numbers keep showing meanwhile, which is exactly what they're for.
 - **Widget missing from the menu bar** — it's usually hidden behind the notch on a
   full menu bar. Free up space, or use a menu-bar manager to reveal it.
-- **Numbers frozen** — dropdown → **Force refresh (clear cache)**.
+- **Numbers frozen** — they shouldn't stay that way on their own. When a fetch keeps
+  failing, the cached reading stands in for up to `STALE_MAX` (30 min) and then clears
+  itself, so the account drops to an error rather than showing a number that's quietly
+  wrong. A cached window that has passed its own reset time is dropped immediately,
+  whatever its age. **Force refresh (clear cache)** is still there if you'd rather not
+  wait — but you shouldn't need it.
 
 ## Contributing
 

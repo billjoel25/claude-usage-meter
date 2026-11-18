@@ -10,6 +10,9 @@ import json
 import os
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,12 +30,22 @@ m = load()
 
 
 def _isolate(tmp):
-    """Point the module's filesystem paths at a throwaway dir."""
+    """Point the module's filesystem paths at a throwaway dir — including the
+    ~/.claude.json the plan watcher reads, so no test depends on this machine."""
     m.APP_DIR = tmp
     m.CACHE_DIR = os.path.join(tmp, "cache")
     m.ACCOUNTS_DIR = os.path.join(tmp, "accounts")
     m.config_candidates = lambda: [os.path.join(tmp, "config.json")]
     m.config_path = lambda: os.path.join(tmp, "config.json")
+    m.CLAUDE_JSON = os.path.join(tmp, "claude.json")
+
+
+def _write_profile(org="claude_team"):
+    """A ~/.claude.json whose oauthAccount reports `org` (None leaves it out)."""
+    acct = {"seatTier": "team_tier_1", "organizationName": "Learnyst"}
+    if org is not None:
+        acct["organizationType"] = org
+    json.dump({"oauthAccount": acct}, open(m.CLAUDE_JSON, "w"))
 
 
 def _title_of(out):
@@ -87,9 +100,65 @@ def test_sev_thresholds():
     assert m.sev(0) == "green"
     assert m.sev(49) == "green"
     assert m.sev(50) == "amber"      # AMBER_AT
-    assert m.sev(84) == "amber"
-    assert m.sev(85) == "red"        # RED_AT
-    assert m.sev(150) == "red"
+    assert m.sev(85) == "amber"      # no red tier by default…
+    assert m.sev(150) == "amber"     # …however close to the ceiling
+    saved = m.RED_AT
+    m.RED_AT = 85                    # opt back in, and red returns
+    try:
+        assert m.sev(84) == "amber"
+        assert m.sev(85) == "red"
+    finally:
+        m.RED_AT = saved
+
+
+def _screenshot_case(err=None):
+    """The dropdown that prompted the color changes: Work, session 21%, weekly 85%
+    with 33h to run — plus a maxed Opus row, the loudest thing usage can show."""
+    data = {"five_hour": {"utilization": 21, "resets_at": "2099-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 85, "resets_at": "2099-01-01T00:00:00Z"},
+            "seven_day_opus": {"utilization": 100}}
+    return {"ok": True, "data": data, "stale": False, "age": 0, "error": err, "source": "x"}
+
+
+def test_usage_is_plain_black_by_default():
+    """Every row, the account header and an error line: plain text, whatever the
+    number. The percentage and its reset countdown say how close you are."""
+    _isolate(tempfile.mkdtemp())
+    lines, _ = m.account_lines({"label": "Work"}, _screenshot_case(err="429 — rate limited"))
+    text = m.color_param("text")
+    for c in ("green", "amber", "red"):
+        for ln in lines:
+            assert m.color_param(c) not in ln and m.sf(c) not in ln, (c, ln)
+    for needle in ("Work", "21%", "85%", "100%", "429"):
+        hit = [ln for ln in lines if needle in ln]
+        assert hit and all(f"color={text}" in ln for ln in hit), (needle, hit)
+    # set explicitly, not left off: SwiftBar draws action-less items gray
+    assert m.COLORS["text"] == ("#000000", "#ffffff")
+
+
+def test_status_colors_on_request():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"colors": "status"}, open(os.path.join(tmp, "config.json"), "w"))
+    lines, _ = m.account_lines({"label": "Work"}, _screenshot_case())
+    assert any("21%" in ln and m.color_param("green") in ln for ln in lines), lines
+    assert any("85%" in ln and m.color_param("amber") in ln for ln in lines), lines
+    for ln in lines:                       # still no red unless RED_AT is set
+        assert m.color_param("red") not in ln and m.sf("red") not in ln, ln
+
+
+def test_color_mode_config():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    cfg = os.path.join(tmp, "config.json")
+    assert m.color_mode() == "neutral"                     # no config at all
+    json.dump({"colors": "status"}, open(cfg, "w"))
+    assert m.color_mode() == "status"
+    for junk in ("rainbow", 1, None, ["status"]):
+        json.dump({"colors": junk}, open(cfg, "w"))
+        assert m.color_mode() == "neutral", junk          # anything else: neutral
+    open(cfg, "w").write("{broken")
+    assert m.color_mode() == "neutral"
 
 
 def test_bar_clamps():
@@ -147,7 +216,7 @@ def test_worst_includes_per_model_limits():
     res = {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": "x"}
     _, worst = m.account_lines({"label": "p"}, res)
     assert worst == 91, worst
-    assert m.sev(worst) == "red"
+    assert m.sev(worst) == "amber"   # loud enough; usage has no red tier
 
 
 def test_account_lines_survives_non_dict_payload():
@@ -443,6 +512,339 @@ def test_footer_quotes_paths():
     assert 'param2="' in out
     assert "Menu bar shows" not in out    # window selector removed
     assert "set-display" not in out
+
+
+# ------------------------------------------- cache: expires and clears on its own
+
+def _write_cache(label, fetched_ago=0, session_reset="2099-01-01T00:00:00Z", pct=57):
+    os.makedirs(m.CACHE_DIR, exist_ok=True)
+    json.dump({"fetched_at": time.time() - fetched_ago, "source": "file",
+               "data": {"five_hour": {"utilization": pct, "resets_at": session_reset},
+                        "seven_day": {"utilization": 24,
+                                      "resets_at": "2099-01-01T00:00:00Z"}}},
+              open(m.cache_path(label), "w"))
+
+
+def _stub_network(token=("t", None, "file"), fetcher=None, oauth=None):
+    """Swap out token lookup and the HTTP call. Returns what to hand _restore."""
+    saved = (m.get_token, m.fetch_usage, m._oauth_token)
+    m.get_token = lambda a: token
+    m.fetch_usage = fetcher or (lambda t: {"five_hour": {"utilization": 1}})
+    if oauth:
+        m._oauth_token = oauth
+    return saved
+
+
+def _restore(saved):
+    m.get_token, m.fetch_usage, m._oauth_token = saved
+
+
+def _http401(_token):
+    raise urllib.error.HTTPError("https://x", 401, "unauthorized", None, None)
+
+
+def test_stale_cache_carries_a_blip_but_not_forever():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        _write_cache("p", fetched_ago=300)             # 5 min old, windows still live
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and res["stale"], res         # carried through the failure
+        assert os.path.exists(m.cache_path("p"))
+        _write_cache("p", fetched_ago=m.STALE_MAX + 60)
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"], res                      # too old to stand in
+        assert not os.path.exists(m.cache_path("p"))   # and cleared without being asked
+    finally:
+        _restore(saved)
+
+
+def test_cache_expires_once_its_window_has_reset():
+    """The real-world failure: 57% sitting in the menu bar beside 'resetting now'.
+    The window it described is over, so the number is wrong however fresh the fetch."""
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        _write_cache("p", fetched_ago=5, session_reset="2000-01-01T00:00:00Z")
+        res = m.usage_for({"label": "p"})              # inside CACHE_TTL, still dropped
+        assert not res["ok"], res
+        assert not os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_rate_limiting_keeps_the_cache():
+    """429 is transient by definition — exactly what a stale cache is for."""
+    _isolate(tempfile.mkdtemp())
+
+    def limited(_t):
+        raise urllib.error.HTTPError("https://x", 429, "slow down", None, None)
+
+    saved = _stub_network(fetcher=limited)
+    try:
+        _write_cache("p", fetched_ago=300)
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and res["stale"]
+        assert "429" in res["error"]
+        assert os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_401_self_heals_when_the_refresh_token_still_works():
+    """An access token can be dead while the refresh behind it works. That should
+    recover by itself, not ask for a sign-out and re-add."""
+    _isolate(tempfile.mkdtemp())
+    tried = []
+
+    def fetch(tok):
+        tried.append(tok)
+        if tok == "dead":
+            _http401(tok)
+        return {"five_hour": {"utilization": 12}}
+
+    saved = _stub_network(token=("dead", None, "signed in"), fetcher=fetch,
+                          oauth=lambda a, force=False: ("fresh", None, "signed in"))
+    try:
+        res = m.usage_for({"label": "p", "refresh_token": "r"})
+        assert res["ok"] and not res["stale"], res
+        assert res["data"]["five_hour"]["utilization"] == 12
+        assert tried == ["dead", "fresh"], tried       # exactly one retry
+        assert os.path.exists(m.cache_path("p"))       # the live reading is cached
+    finally:
+        _restore(saved)
+
+
+def test_401_that_cannot_heal_drops_the_cache_without_a_second_request():
+    _isolate(tempfile.mkdtemp())
+    tried = []
+
+    def fetch(tok):
+        tried.append(tok)
+        _http401(tok)
+
+    saved = _stub_network(token=("dead", None, "signed in"), fetcher=fetch,
+                          oauth=lambda a, force=False: ("dead", None, "signed in"))
+    try:
+        # older than CACHE_TTL so a fetch is attempted, younger than STALE_MAX so
+        # only the 401 itself can be what drops it
+        _write_cache("p", fetched_ago=m.CACHE_TTL + 60)
+        res = m.usage_for({"label": "p", "refresh_token": "r"})
+        assert not res["ok"] and "401" in res["error"], res
+        assert not os.path.exists(m.cache_path("p"))   # rejected token -> numbers go
+        assert tried == ["dead"], tried                # no pointless repeat call
+    finally:
+        _restore(saved)
+
+
+def test_401_without_any_refresh_token_just_reports():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=("dead", None, "keychain"), fetcher=_http401)
+    try:
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"] and "401" in res["error"]
+        assert "run `claude`" in res["error"]          # not an in-app sign-in
+    finally:
+        _restore(saved)
+
+
+def test_unusable_cache_file_is_cleaned_up():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(token=(None, None, "not logged in"))
+    try:
+        os.makedirs(m.CACHE_DIR, exist_ok=True)
+        open(m.cache_path("p"), "w").write("{broken")
+        res = m.usage_for({"label": "p"})
+        assert not res["ok"]
+        assert not os.path.exists(m.cache_path("p"))
+    finally:
+        _restore(saved)
+
+
+def test_a_live_fetch_always_wins():
+    _isolate(tempfile.mkdtemp())
+    saved = _stub_network(fetcher=lambda t: {"five_hour": {"utilization": 3}})
+    try:
+        _write_cache("p", fetched_ago=m.STALE_MAX + 60, pct=99)
+        res = m.usage_for({"label": "p"})
+        assert res["ok"] and not res["stale"]
+        assert res["data"]["five_hour"]["utilization"] == 3
+    finally:
+        _restore(saved)
+
+
+def test_expired_numbers_say_so_rather_than_blaming_the_login():
+    res = {"ok": False, "data": None, "stale": False, "age": None,
+           "error": "TimeoutError", "source": None}
+    lines, _ = m.account_lines({"label": "p"}, res)
+    assert any("cached numbers had expired" in ln for ln in lines), lines
+    res["error"] = "401 — sign-in invalid, re-add the account"
+    lines, _ = m.account_lines({"label": "p"}, res)
+    assert any("Not logged into this account" in ln for ln in lines), lines
+
+
+def test_windows_reset_detection():
+    assert m._windows_reset({"five_hour": {"resets_at": "2000-01-01T00:00:00Z"}}, time.time())
+    assert not m._windows_reset({"five_hour": {"resets_at": "2099-01-01T00:00:00Z"}}, time.time())
+    assert not m._windows_reset({"five_hour": {"utilization": 5}}, time.time())   # no date
+    assert not m._windows_reset({"five_hour": {"resets_at": "nonsense"}}, time.time())
+    assert not m._windows_reset(None, time.time())
+
+
+# --------------------------------------------------- plan-change notification
+
+def _watch(sent):
+    """watch_plan() with notify() swapped for a recorder."""
+    saved = m.notify
+    m.notify = lambda title, body: sent.append((title, body)) or "SwiftBar"
+    try:
+        return m.watch_plan()
+    finally:
+        m.notify = saved
+
+
+def test_plan_first_run_records_quietly():
+    _isolate(tempfile.mkdtemp())
+    _write_profile("claude_team")
+    sent = []
+    assert _watch(sent) is None and sent == []
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
+
+
+def test_plan_notifies_once_when_the_org_leaves_team():
+    """The one thing asked for. The Enterprise string isn't known, so any move off
+    claude_team counts — and the notification quotes what it actually read."""
+    _isolate(tempfile.mkdtemp())
+    _write_profile("claude_team")
+    sent = []
+    _watch(sent)
+    _write_profile("claude_enterprise")
+    _watch(sent)
+    assert len(sent) == 1, sent
+    assert "claude_enterprise" in sent[0][1] and "Team" in sent[0][1], sent
+    _watch(sent)                                  # later ticks, same value: silent
+    _watch(sent)
+    assert len(sent) == 1, sent
+
+
+def test_plan_says_nothing_when_it_cannot_read():
+    """Unreadable is not a change — and must not overwrite what was last seen, or
+    the real move afterwards would slip by unannounced."""
+    _isolate(tempfile.mkdtemp())
+    _write_profile("claude_team")
+    sent = []
+    _watch(sent)
+    for broken in (lambda: os.remove(m.CLAUDE_JSON),
+                   lambda: open(m.CLAUDE_JSON, "w").write("{broken"),
+                   lambda: json.dump({"other": 1}, open(m.CLAUDE_JSON, "w")),
+                   lambda: _write_profile(None),
+                   lambda: _write_profile("")):
+        broken()
+        assert _watch(sent) is None
+    assert sent == []
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
+    _write_profile("claude_enterprise")           # …so the real move still lands
+    _watch(sent)
+    assert len(sent) == 1, sent
+
+
+def test_plan_no_noise_except_leaving_team():
+    """Returning to Team, or moving between other plans, isn't the event."""
+    _isolate(tempfile.mkdtemp())
+    sent = []
+    for org in ("claude_max", "claude_pro", "claude_team", "claude_team"):
+        _write_profile(org)
+        _watch(sent)
+    assert sent == [], sent
+    _write_profile("claude_enterprise")           # leaving Team again is
+    _watch(sent)
+    assert len(sent) == 1, sent
+
+
+def test_plan_survives_a_corrupt_state_file():
+    _isolate(tempfile.mkdtemp())
+    os.makedirs(m.APP_DIR, exist_ok=True)
+    open(m.plan_state_path(), "w").write("[1, 2")
+    _write_profile("claude_team")
+    sent = []
+    assert _watch(sent) is None and sent == []    # treated as a first run
+    assert json.load(open(m.plan_state_path())) == {"organizationType": "claude_team"}
+
+
+def test_notify_is_a_no_op_off_macos():
+    saved = (sys.platform, m.subprocess.run)
+    calls = []
+    m.subprocess.run = lambda *a, **k: calls.append(a)
+    sys.platform = "linux"
+    try:
+        assert m.notify("t", "b") is None
+    finally:
+        sys.platform, m.subprocess.run = saved
+    assert calls == []
+
+
+def test_notify_goes_through_swiftbar_by_file_name():
+    """SwiftBar finds a plugin by its file name, and doesn't decode '+' as a space —
+    so spaces must travel as %20 or the banner reads 'Your+org+is…'."""
+    saved = (sys.platform, m.subprocess.run, m._swiftbar_present, sys.argv,
+             os.environ.pop("SWIFTBAR_PLUGIN_PATH", None))
+    calls = []
+    m.subprocess.run = lambda cmd, **k: calls.append(cmd)
+    m._swiftbar_present = lambda: True
+    sys.platform = "darwin"
+    sys.argv = ["/Users/x/Library/Application Support/SwiftBar/Plugins/claude-usage.5m.py"]
+    try:
+        assert m.notify("Claude plan changed", "now “claude_enterprise” & more") == "SwiftBar"
+    finally:
+        sys.platform, m.subprocess.run, m._swiftbar_present, sys.argv = saved[:4]
+        if saved[4] is not None:
+            os.environ["SWIFTBAR_PLUGIN_PATH"] = saved[4]
+    cmd = calls[0]
+    assert cmd[:2] == ["/usr/bin/open", "-g"], cmd
+    url = cmd[2]
+    assert url.startswith("swiftbar://notify?") and "plugin=claude-usage.5m.py" in url, url
+    assert "+" not in url and "%20" in url, url
+    q = urllib.parse.parse_qs(url.split("?", 1)[1])
+    assert q["body"] == ["now “claude_enterprise” & more"], q     # round-trips intact
+
+
+def test_notify_falls_back_to_osascript_without_swiftbar():
+    saved = (sys.platform, m.subprocess.run, m._swiftbar_present)
+    calls = []
+    m.subprocess.run = lambda cmd, **k: calls.append(cmd)
+    m._swiftbar_present = lambda: False
+    sys.platform = "darwin"
+    try:
+        assert m.notify('say "hi"', 'quote " and \\ backslash') == "Script Editor"
+    finally:
+        sys.platform, m.subprocess.run, m._swiftbar_present = saved
+    cmd = calls[0]
+    assert cmd[0] == "/usr/bin/osascript"
+    # title and body travel as argv — never spliced into the script's source
+    assert cmd[-2:] == ['say "hi"', 'quote " and \\ backslash'], cmd
+    assert not any('say "hi"' in part for part in cmd[:-2]), cmd
+
+
+def test_nothing_about_privacy_in_the_menu():
+    """No dot in the menu bar, no section in the dropdown — just usage."""
+    _isolate(tempfile.mkdtemp())
+    _write_profile("claude_enterprise")
+    out = _render_main({"five_hour": {"utilization": 5}})
+    assert _title_of(out).strip() == "5%", _title_of(out)
+    for noise in ("🟢", "🟡", "🔴", "Org can", "org policy", "plan confirmed",
+                  "claude_team", "claude_enterprise", "Learnyst"):
+        assert noise not in out, noise
+
+
+def test_main_survives_a_broken_watcher():
+    _isolate(tempfile.mkdtemp())
+    saved = m.watch_plan
+    m.watch_plan = lambda: 1 / 0
+    try:
+        out = _render_main({"five_hour": {"utilization": 5}})
+    finally:
+        m.watch_plan = saved
+    assert _title_of(out).strip() == "5%"
 
 
 # ------------------------------------------------------------------- runner

@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Plan-change notification.** If your Claude org ever moves off Team — to
+  Enterprise, where admins may be able to read your Claude Code sessions — you get
+  a single macOS notification, sent through SwiftBar. Nothing shows in the menu bar
+  or the dropdown, before or after. It watches `oauthAccount.organizationType` in
+  `~/.claude.json` and fires on any move off `claude_team`, quoting what it read,
+  since the string an Enterprise org reports isn't known. A file it can't read is
+  skipped, never reported as a change. `notify-test` checks that macOS will show it.
 - **Account order and menu-bar on/off.** A new **Accounts** submenu in the
   dropdown: click an account to show or hide its number in the menu bar, or move
   it up/down. The order applies to the menu bar *and* the dropdown sections. A
@@ -18,6 +25,23 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mention follow at the end and are shown, so the key stays optional.
 
 ### Changed
+- **Usage is plain black text.** No traffic-light colors on the rows, the bars, the
+  account header or its error line, however close a window is to its limit — a
+  weekly window at 85% with a day and a half still to run had lit the dropdown up
+  like an alarm, when the number and its reset countdown already say exactly how
+  close you are. The color is set explicitly (black, or white in dark mode), since
+  SwiftBar draws items without an action as disabled gray. For the old look, set
+  `"colors": "status"`: green below half, amber above, and red only if `RED_AT` is
+  set — it now defaults to `None`.
+- **The cache expires and clears itself.** A failed fetch is still carried by the
+  last good reading — but only for `STALE_MAX` (30 min), and never past the reset
+  time the reading itself carries: a window that has already rolled over makes its
+  number wrong, not merely old. Beyond that the numbers are dropped *and the cache
+  file deleted*, so the account falls back to an error rather than showing a
+  confident, stale percentage in the menu bar indefinitely. **Force refresh (clear
+  cache)** remains, but is no longer something you have to remember to click. A
+  cache file that won't parse is now cleaned up the same way, and signing an
+  account back in drops its old cache so a re-add starts clean.
 - **The menu bar now shows only your current session** — the rolling 5-hour window.
   A higher weekly or per-model (Opus/Sonnet) number no longer replaces it, and the
   **⚠** cross-window marker is gone, so the number up top is always the one window.
@@ -31,6 +55,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   action — with the menu bar fixed to the current session there is nothing to pick.
   The `"menu_bar"` config key is no longer read; a leftover one is ignored, not
   rewritten, and new starter configs omit it.
+
+### Fixed
+- **A rejected token now heals itself where it can.** On a 401 the widget forces
+  one token refresh and retries before reporting anything — an access token can be
+  dead while the refresh token behind it still works, which previously meant a
+  needless sign-out-and-re-add. If that doesn't take, the stale cache for the
+  account is cleared rather than left standing. The retry is skipped when the
+  refresh returns the same token, so a genuinely dead account costs no extra
+  request per tick.
 
 ## [1.2.0] - 2026-07-14
 

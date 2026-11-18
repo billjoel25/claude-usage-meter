@@ -18,6 +18,9 @@
 #                any per-model weekly caps, and extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
 #
+# If your Claude org ever moves off Team (to Enterprise, say), you get one macOS
+# notification. Nothing else about it shows. See "plan-change notice" below.
+#
 # Sign in from the menu ("Add Claude account") — no Claude Code CLI needed.
 # Multiple accounts are supported; tokens are stored locally and auto-refreshed.
 # An existing Claude Code login is also auto-detected. See README.md.
@@ -42,14 +45,28 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 # The endpoint aggressively rate-limits requests without a claude-code User-Agent.
 UA = "claude-code/2.0.0 (claude-usage-meter)"
 CACHE_TTL = 180          # seconds — the endpoint 429s if polled harder than ~3 min
+# How long the cache may stand in for a live reading. Long enough to carry a blip —
+# a Keychain prompt that timed out, a dropped network, a 429 — and no longer. Past
+# it the numbers clear themselves instead of waiting to be cleared by hand: a
+# confidently wrong percentage in the menu bar is worse than no percentage.
+STALE_MAX = 1800         # seconds (6 refresh ticks)
 HTTP_TIMEOUT = 12        # seconds
 APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.config/claude-usage-meter"))
 CACHE_DIR = os.path.join(APP_DIR, "cache")
 ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 
-# Utilization thresholds -> severity. Green until half, amber, red near the ceiling.
+# How usage is colored in the dropdown — "colors" in the config file:
+#   'neutral' (default) — plain black text, every row, whatever the number. The
+#                         percentage and its reset countdown say how close you are;
+#                         color on top of that added worry, not information.
+#   'status'            — green, then amber past AMBER_AT (and red past RED_AT, if set).
+COLOR_MODES = ("neutral", "status")
+COLOR_DEFAULT = "neutral"
+
+# Utilization thresholds -> severity, used only in 'status' mode. Green until half,
+# then amber, and that's as loud as it gets unless RED_AT is set (e.g. 85).
 AMBER_AT = 50
-RED_AT = 85
+RED_AT = None
 
 # (light, dark) hex so it reads on both menu-bar appearances.
 COLORS = {
@@ -57,6 +74,10 @@ COLORS = {
     "amber": ("#9a6700", "#d4a72c"),
     "red":   ("#cf222e", "#ff7b72"),
     "dim":   ("#6e7781", "#8b949e"),
+    # Plain text: black on a light menu, white on a dark one. Set explicitly because
+    # SwiftBar draws an item with no action as disabled — leave the color off and a
+    # usage row comes out gray, not black.
+    "text":  ("#000000", "#ffffff"),
 }
 DOT = {"green": "🟢", "amber": "🟡", "red": "🔴", "dim": "⚪"}
 
@@ -272,6 +293,95 @@ def do_move_account():
         _write_display(entries)
 
 
+# ------------------------------------------------------------ plan-change notice
+# One job: a single macOS notification if your Claude org ever moves off Team.
+# Enterprise is where org admins can gain access to your Claude Code session
+# transcripts (through the Compliance API), so that move is worth hearing about.
+# Nothing shows in the menu bar or the dropdown; you hear from this exactly when it
+# happens, and never otherwise.
+#
+# The organizationType an Enterprise org reports isn't known, so this doesn't match
+# a guessed string. It remembers the last value it read from ~/.claude.json and
+# speaks up when "claude_team" turns into anything else, quoting what it now reads.
+# A file it can't read is skipped — never reported as a change.
+
+CLAUDE_JSON = "~/.claude.json"
+TEAM = "claude_team"
+
+
+def plan_state_path():
+    return os.path.join(APP_DIR, "plan-state.json")
+
+
+def _org_type():
+    """oauthAccount.organizationType from ~/.claude.json, or None if unreadable."""
+    try:
+        with open(os.path.expanduser(CLAUDE_JSON)) as fh:
+            acct = json.load(fh).get("oauthAccount")
+        v = acct.get("organizationType") if isinstance(acct, dict) else None
+        return v if isinstance(v, str) and v else None
+    except Exception:
+        return None
+
+
+def _swiftbar_present():
+    return bool(os.environ.get("SWIFTBAR")) or any(
+        os.path.isdir(p) for p in ("/Applications/SwiftBar.app",
+                                   os.path.expanduser("~/Applications/SwiftBar.app")))
+
+
+def notify(title, body):
+    """Post one macOS notification. Goes through SwiftBar's own notify scheme where
+    SwiftBar is installed, so it arrives from SwiftBar; otherwise through osascript.
+    Returns the app it was sent as ('SwiftBar' / 'Script Editor'), or None if no
+    notifier ran. Sent is not the same as shown — `notify-test` checks that."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        if _swiftbar_present():
+            # SwiftBar addresses a plugin by its file name, e.g. claude-usage.5m.py
+            plugin = os.path.basename(os.environ.get("SWIFTBAR_PLUGIN_PATH") or sys.argv[0])
+            q = urllib.parse.urlencode({"plugin": plugin, "title": title, "body": body},
+                                       quote_via=urllib.parse.quote)   # %20, never '+'
+            cmd, via = ["/usr/bin/open", "-g", f"swiftbar://notify?{q}"], "SwiftBar"
+        else:
+            cmd = ["/usr/bin/osascript", "-e", "on run argv", "-e",
+                   "display notification (item 2 of argv) with title (item 1 of argv)",
+                   "-e", "end run", title, body]   # passed as argv: nothing to escape
+            via = "Script Editor"
+        subprocess.run(cmd, timeout=8, capture_output=True)
+        return via
+    except Exception:
+        return None
+
+
+def watch_plan():
+    """Run once per tick. Notifies when organizationType moves off claude_team, and
+    returns the message it sent — or None. Never raises."""
+    seen = _org_type()
+    if seen is None:
+        return None                     # can't read it: say nothing, remember nothing
+    try:
+        with open(plan_state_path()) as fh:
+            last = json.load(fh).get("organizationType")
+    except Exception:
+        last = None                     # first run, or a state file we can't use
+    if seen == last:
+        return None
+    sent = None
+    if last == TEAM:
+        sent = (f"Your org is no longer on Team — it now reads “{seen}”. On Enterprise, "
+                f"admins may be able to read your Claude Code sessions.")
+        notify("Claude plan changed", sent)
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(plan_state_path(), "w") as fh:
+            json.dump({"organizationType": seen}, fh)
+    except Exception:
+        pass
+    return sent
+
+
 # ------------------------------------------------------------------------ credentials
 
 def _token_from_blob(blob):
@@ -361,9 +471,39 @@ def _slug(s):
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in str(s)).lower() or "acct"
 
 
+def _store_usage(cp, data, now, source):
+    """Cache a live reading and return it. A cache we can't write is not a reason to
+    withhold numbers we just fetched."""
+    try:
+        with open(cp, "w") as fh:
+            json.dump({"fetched_at": now, "data": data, "source": source}, fh)
+    except Exception:
+        pass
+    return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
+
+
+def _retry_after_401(acct, cp, now, tried):
+    """One self-healing retry after the server rejects a token: force a refresh and
+    fetch again. An access token can be dead while the refresh token behind it still
+    works, and recovering here saves a sign-out-and-re-add the user shouldn't need.
+
+    Returns the live result, or None when there is no refresh token, the refresh
+    didn't produce a different token, or the second attempt failed too."""
+    if not acct.get("refresh_token"):
+        return None
+    try:
+        token, _, source = _oauth_token(acct, force=True)
+        if not token or token == tried:
+            return None          # nothing new to try — don't spend a second request
+        return _store_usage(cp, fetch_usage(token), now, source)
+    except Exception:
+        return None
+
+
 def usage_for(acct):
-    """Return dict: {ok, data, stale, age, error, source}. Uses a 180s cache to
-    stay well under the endpoint's rate limit and to survive transient failures."""
+    """Return dict: {ok, data, stale, age, error, source}. A 180s cache keeps us well
+    under the endpoint's rate limit; beyond that the cache carries a transient failure
+    for a while and then expires itself — see _fallback."""
     label = acct.get("label", "account")
     os.makedirs(CACHE_DIR, exist_ok=True)
     cp = cache_path(label)
@@ -376,43 +516,95 @@ def usage_for(acct):
         except Exception:
             cached = None
 
-    # Serve a fresh-enough cache without touching the network.
+    # Serve a fresh-enough cache without touching the network — unless a window it
+    # describes has already reset, which makes it wrong however recently we fetched.
     now = time.time()
-    if cached and (now - cached.get("fetched_at", 0)) < CACHE_TTL:
+    if cached and (now - cached.get("fetched_at", 0)) < CACHE_TTL \
+            and not _windows_reset(cached.get("data"), now):
         return {"ok": True, "data": cached["data"], "stale": False,
                 "age": now - cached["fetched_at"], "error": None, "source": cached.get("source")}
 
     token, exp, source = get_token(acct)
     if not token:
-        return _fallback(cached, now, error=source)
+        return _fallback(cached, now, error=source, cache_file=cp)
 
     # Signed-in (OAuth) accounts are refreshed in-app; a stale one means "re-add",
     # not "run claude" (which only applies to an auto-detected Claude Code login).
     is_oauth = acct.get("kind") == "oauth" or bool(acct.get("refresh_token"))
 
     if exp and _to_ms(exp) < now * 1000:
-        return _fallback(cached, now, error=(
+        return _fallback(cached, now, cache_file=cp, error=(
             "sign-in expired — sign out and re-add" if is_oauth
             else "token expired — run `claude` to refresh login"))
 
     try:
-        data = fetch_usage(token)
-        with open(cp, "w") as fh:
-            json.dump({"fetched_at": now, "data": data, "source": source}, fh)
-        return {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": source}
+        return _store_usage(cp, fetch_usage(token), now, source)
     except urllib.error.HTTPError as e:
         if e.code == 401:
-            return _fallback(cached, now, error=(
+            healed = _retry_after_401(acct, cp, now, token)
+            if healed:
+                return healed
+            return _fallback(cached, now, cache_file=cp, drop=True, error=(
                 "401 — sign-in invalid, re-add the account" if is_oauth
                 else "401 — login invalid/expired, run `claude`"))
         if e.code == 429:
-            return _fallback(cached, now, error="429 — rate limited, showing cache")
-        return _fallback(cached, now, error=f"HTTP {e.code}")
+            return _fallback(cached, now, cache_file=cp, error="429 — rate limited, showing cache")
+        return _fallback(cached, now, cache_file=cp, error=f"HTTP {e.code}")
     except Exception as e:
-        return _fallback(cached, now, error=f"{type(e).__name__}")
+        return _fallback(cached, now, cache_file=cp, error=f"{type(e).__name__}")
 
 
-def _fallback(cached, now, error):
+def _iso_epoch(iso):
+    """Epoch seconds for an ISO-8601 reset time, or None when it isn't one."""
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _windows_reset(data, now):
+    """True once a window in this payload has passed its own resets_at. Whatever the
+    number was, the window it described is over — so the number is wrong now, not
+    merely old, however recently it was fetched."""
+    if not isinstance(data, dict):
+        return False
+    for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        when = _iso_epoch(util(data.get(key))[1])
+        if when is not None and when <= now:
+            return True
+    return False
+
+
+def _drop_cache(cache_file):
+    """Delete a cache entry. Nothing in it is precious — it is a copy of a reading
+    the server will hand back the moment we can ask again."""
+    try:
+        if cache_file and os.path.exists(cache_file):
+            os.remove(cache_file)
+    except Exception:
+        pass          # non-fatal: worst case it expires again on the next tick
+
+
+def _cache_expired(cached, now):
+    """Can these cached numbers still be true? Unusable, past STALE_MAX, or
+    describing a window that has since reset — all mean no."""
+    if not isinstance(cached, dict) or "data" not in cached:
+        return True
+    if now - cached.get("fetched_at", 0) > STALE_MAX:
+        return True
+    return _windows_reset(cached.get("data"), now)
+
+
+def _fallback(cached, now, error, cache_file=None, drop=False):
+    """Stand in for a live reading with the last good numbers — but only while they
+    can still be true. Once they can't, they are dropped *and deleted*, and the
+    account reports the error on its own. `drop` forces that for a failure the
+    numbers can't come back from by themselves.
+
+    This is the clearing that used to need a trip to 'Force refresh (clear cache)'."""
+    if drop or _cache_expired(cached, now):
+        _drop_cache(cache_file)
+        cached = None
     if cached and "data" in cached:
         return {"ok": True, "data": cached["data"], "stale": True,
                 "age": now - cached.get("fetched_at", now), "error": error,
@@ -433,11 +625,17 @@ def _to_ms(v):
 def sev(pct):
     if pct is None:
         return "dim"
-    if pct >= RED_AT:
+    if RED_AT is not None and pct >= RED_AT:
         return "red"
     if pct >= AMBER_AT:
         return "amber"
     return "green"
+
+
+def color_mode():
+    """'neutral' (default) or 'status' — `colors` in the config file."""
+    v = _read_config().get("colors")
+    return v if v in COLOR_MODES else COLOR_DEFAULT
 
 
 def bar(pct, cells=10):
@@ -507,11 +705,16 @@ def account_lines(acct, res, in_bar=True):
     worst = None
 
     if not res["ok"]:
-        lines.append(f"{label} — {res['error'] or 'not logged in'} "
+        err = res["error"] or "not logged in"
+        lines.append(f"{label} — {err} "
                      f"| sfimage=circle.dashed sfcolor={sf('dim')} color={color_param('dim')} "
                      f"font=Menlo-Bold size=13 trim=false")
-        lines.append(f"-- Not logged into this account, or credentials unreachable. "
-                     f"See 'About / setup'. | color={color_param('dim')} size=12")
+        auth = any(k in err for k in ("401", "sign-in", "logged in", "token"))
+        hint = ("Not logged into this account, or credentials unreachable. "
+                "See 'About / setup'." if auth else
+                "No live reading, and the cached numbers had expired — better nothing "
+                "than something wrong.")
+        lines.append(f"-- {hint} | color={color_param('dim')} size=12")
         return lines, worst
 
     data = res["data"] if isinstance(res["data"], dict) else {}
@@ -525,11 +728,15 @@ def account_lines(acct, res, in_bar=True):
 
     head = label + ("" if in_bar else "  ·  hidden from menu bar") \
                  + ("  (cached)" if res["stale"] else "")
-    lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
-                 f"font=Menlo-Bold size=13 trim=false")
+    neutral = color_mode() == "neutral"
+    if neutral:
+        lines.append(f"{head} | color={color_param('text')} font=Menlo-Bold size=13 trim=false")
+    else:
+        lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
+                     f"font=Menlo-Bold size=13 trim=false")
 
     def row(name, pct, reset):
-        c = color_param(sev(pct))
+        c = color_param("text" if neutral else sev(pct))
         text = f"  {name:<7} [{bar(pct)}] {fmt_pct(pct):>4}"
         r = fmt_reset(reset)
         if r:
@@ -554,7 +761,8 @@ def account_lines(acct, res, in_bar=True):
                          f"| font=Menlo size=12 trim=false color={color_param('dim')}")
 
     if res["error"]:
-        lines.append(f"  ⚠︎ {res['error']} | size=12 color={color_param('amber')} trim=false")
+        lines.append(f"  ⚠︎ {res['error']} | size=12 trim=false "
+                     f"color={color_param('text' if neutral else 'amber')}")
 
     if acct.get("kind") == "oauth" or acct.get("refresh_token"):
         lines.append(f'  ↳ sign out | bash=/bin/rm param1=-f param2="{account_file(label)}" '
@@ -633,12 +841,13 @@ def _store_tokens(label, tok, email=None):
     return data
 
 
-def _oauth_token(acct):
+def _oauth_token(acct, force=False):
     """(access_token, expires_at_ms, source) for an app-managed account, refreshing
-    via the refresh_token when the access token is stale."""
+    via the refresh_token when the access token is stale — or when `force` says the
+    server has already rejected it, whatever the stored expiry claims."""
     now_ms = int(time.time() * 1000)
     exp = acct.get("expires_at")
-    if exp and exp - now_ms > 60_000:
+    if not force and exp and exp - now_ms > 60_000:
         return acct.get("access_token"), exp, "signed in"
     rt = acct.get("refresh_token")
     if not rt:
@@ -785,6 +994,7 @@ def do_signin():
         print("     so it won't overwrite the other. Rename it later from the config file.")
         label = safe
     _store_tokens(label, tok, email=email)
+    _drop_cache(cache_path(label))   # a re-add starts clean, not on the old numbers
     who = email or label
     print(f"\n  ✓ Signed in as {who}.")
     print("    It appears in the menu bar within a few minutes — or click the")
@@ -849,6 +1059,10 @@ def _welcome():
 
 def main():
     _ensure_config()
+    try:
+        watch_plan()                # silent unless the org moves off Team
+    except Exception:
+        pass                        # never let the watcher take the widget down
     prefs = _display_prefs()
     hidden = hidden_labels(prefs)
     accounts = order_accounts(load_accounts(), prefs)
@@ -903,6 +1117,12 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "signin":
         do_signin()
+        raise SystemExit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "notify-test":
+        via = notify("Claude plan changed (test)",
+                     "This is how you'll hear if your org ever moves off Team.")
+        print(f"Sent as {via}. If nothing appeared, allow notifications for {via} in "
+              f"System Settings → Notifications." if via else "Notifications need macOS.")
         raise SystemExit(0)
     if len(sys.argv) > 1 and sys.argv[1] == "toggle-account":
         do_toggle_account()
