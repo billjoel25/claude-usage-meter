@@ -56,11 +56,16 @@ APP_DIR = os.path.expanduser(os.environ.get("CLAUDE_USAGE_METER_HOME", "~/.confi
 CACHE_DIR = os.path.join(APP_DIR, "cache")
 ACCOUNTS_DIR = os.path.join(APP_DIR, "accounts")
 
-# Utilization thresholds -> severity. Green until half, then amber — and that's as
-# loud as usage gets. Nearing a limit isn't an emergency, and red read as one: a
-# weekly window at 85% with a day and a half still to run turned the dropdown into an
-# alarm. The percentage and the reset countdown already say how close you are.
-# Set RED_AT (e.g. 85) to bring a red tier back.
+# How usage is colored in the dropdown — "colors" in the config file:
+#   'neutral' (default) — plain black text, every row, whatever the number. The
+#                         percentage and its reset countdown say how close you are;
+#                         color on top of that added worry, not information.
+#   'status'            — green, then amber past AMBER_AT (and red past RED_AT, if set).
+COLOR_MODES = ("neutral", "status")
+COLOR_DEFAULT = "neutral"
+
+# Utilization thresholds -> severity, used only in 'status' mode. Green until half,
+# then amber, and that's as loud as it gets unless RED_AT is set (e.g. 85).
 AMBER_AT = 50
 RED_AT = None
 
@@ -70,6 +75,10 @@ COLORS = {
     "amber": ("#9a6700", "#d4a72c"),
     "red":   ("#cf222e", "#ff7b72"),
     "dim":   ("#6e7781", "#8b949e"),
+    # Plain text: black on a light menu, white on a dark one. Set explicitly because
+    # SwiftBar draws an item with no action as disabled — leave the color off and a
+    # usage row comes out gray, not black.
+    "text":  ("#000000", "#ffffff"),
 }
 DOT = {"green": "🟢", "amber": "🟡", "red": "🔴", "dim": "⚪"}
 
@@ -838,6 +847,12 @@ def sev(pct):
     return "green"
 
 
+def color_mode():
+    """'neutral' (default) or 'status' — `colors` in the config file."""
+    v = _read_config().get("colors")
+    return v if v in COLOR_MODES else COLOR_DEFAULT
+
+
 def bar(pct, cells=10):
     if pct is None:
         return "─" * cells
@@ -928,11 +943,15 @@ def account_lines(acct, res, in_bar=True):
 
     head = label + ("" if in_bar else "  ·  hidden from menu bar") \
                  + ("  (cached)" if res["stale"] else "")
-    lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
-                 f"font=Menlo-Bold size=13 trim=false")
+    neutral = color_mode() == "neutral"
+    if neutral:
+        lines.append(f"{head} | color={color_param('text')} font=Menlo-Bold size=13 trim=false")
+    else:
+        lines.append(f"{head} | sfimage=circle.fill sfcolor={sf(sev(worst))} "
+                     f"font=Menlo-Bold size=13 trim=false")
 
     def row(name, pct, reset):
-        c = color_param(sev(pct))
+        c = color_param("text" if neutral else sev(pct))
         text = f"  {name:<7} [{bar(pct)}] {fmt_pct(pct):>4}"
         r = fmt_reset(reset)
         if r:
@@ -957,7 +976,8 @@ def account_lines(acct, res, in_bar=True):
                          f"| font=Menlo size=12 trim=false color={color_param('dim')}")
 
     if res["error"]:
-        lines.append(f"  ⚠︎ {res['error']} | size=12 color={color_param('amber')} trim=false")
+        lines.append(f"  ⚠︎ {res['error']} | size=12 trim=false "
+                     f"color={color_param('text' if neutral else 'amber')}")
 
     if acct.get("kind") == "oauth" or acct.get("refresh_token"):
         lines.append(f'  ↳ sign out | bash=/bin/rm param1=-f param2="{account_file(label)}" '

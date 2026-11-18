@@ -129,19 +129,54 @@ def test_sev_thresholds():
         m.RED_AT = saved
 
 
-def test_usage_never_turns_red_by_default():
-    """The screenshot that prompted this: weekly at 85% with 33h to run, painted red.
-    Approaching a limit isn't an emergency — the number and the reset time say how
-    close you are, so neither the rows nor the header dot go red."""
+def _screenshot_case(err=None):
+    """The dropdown that prompted the color changes: Work, session 21%, weekly 85%
+    with 33h to run — plus a maxed Opus row, the loudest thing usage can show."""
     data = {"five_hour": {"utilization": 21, "resets_at": "2099-01-01T00:00:00Z"},
             "seven_day": {"utilization": 85, "resets_at": "2099-01-01T00:00:00Z"},
             "seven_day_opus": {"utilization": 100}}
-    res = {"ok": True, "data": data, "stale": False, "age": 0, "error": None, "source": "x"}
-    lines, _ = m.account_lines({"label": "Work"}, res)
-    for ln in lines:
-        assert m.color_param("red") not in ln and m.sf("red") not in ln, ln
-    assert any("85%" in ln and m.color_param("amber") in ln for ln in lines), lines
+    return {"ok": True, "data": data, "stale": False, "age": 0, "error": err, "source": "x"}
+
+
+def test_usage_is_plain_black_by_default():
+    """Every row, the account header and an error line: plain text, whatever the
+    number. The percentage and its reset countdown say how close you are."""
+    _isolate(tempfile.mkdtemp())
+    lines, _ = m.account_lines({"label": "Work"}, _screenshot_case(err="429 — rate limited"))
+    text = m.color_param("text")
+    for c in ("green", "amber", "red"):
+        for ln in lines:
+            assert m.color_param(c) not in ln and m.sf(c) not in ln, (c, ln)
+    for needle in ("Work", "21%", "85%", "100%", "429"):
+        hit = [ln for ln in lines if needle in ln]
+        assert hit and all(f"color={text}" in ln for ln in hit), (needle, hit)
+    # set explicitly, not left off: SwiftBar draws action-less items gray
+    assert m.COLORS["text"] == ("#000000", "#ffffff")
+
+
+def test_status_colors_on_request():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    json.dump({"colors": "status"}, open(os.path.join(tmp, "config.json"), "w"))
+    lines, _ = m.account_lines({"label": "Work"}, _screenshot_case())
     assert any("21%" in ln and m.color_param("green") in ln for ln in lines), lines
+    assert any("85%" in ln and m.color_param("amber") in ln for ln in lines), lines
+    for ln in lines:                       # still no red unless RED_AT is set
+        assert m.color_param("red") not in ln and m.sf("red") not in ln, ln
+
+
+def test_color_mode_config():
+    tmp = tempfile.mkdtemp()
+    _isolate(tmp)
+    cfg = os.path.join(tmp, "config.json")
+    assert m.color_mode() == "neutral"                     # no config at all
+    json.dump({"colors": "status"}, open(cfg, "w"))
+    assert m.color_mode() == "status"
+    for junk in ("rainbow", 1, None, ["status"]):
+        json.dump({"colors": junk}, open(cfg, "w"))
+        assert m.color_mode() == "neutral", junk          # anything else: neutral
+    open(cfg, "w").write("{broken")
+    assert m.color_mode() == "neutral"
 
 
 def test_bar_clamps():

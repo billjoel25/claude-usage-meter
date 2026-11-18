@@ -49,10 +49,11 @@ Accounts
 - **Pure Python 3** — no pip installs, no build step.
 - **Private** — your token is stored locally and sent only to `api.anthropic.com`
   over HTTPS. Nothing goes to any third party.
-- Calm colors: green, then amber once a window passes half — never red, because
-  nearing a limit isn't an emergency and the countdown tells you when it clears.
-  Reset countdowns; per-model weekly limits (`seven_day_opus` / `seven_day_sonnet`)
-  and extra-usage credits when your plan reports them.
+- Plain black text — no traffic-light colors on your usage, however close a window
+  gets. The percentage and its reset countdown say how near you are and when it
+  clears; color on top of that only added worry. (Want green/amber back? See
+  [Tuning](#tuning).) Per-model weekly limits (`seven_day_opus` / `seven_day_sonnet`)
+  and extra-usage credits appear when your plan reports them.
 
 ## Install
 
@@ -253,11 +254,15 @@ The menu-bar number is always the current session (the rolling 5-hour window) �
 is nothing to configure. Earlier versions had a **Menu bar shows** selector backed by a
 `"menu_bar"` config key; both are gone, and a leftover `"menu_bar"` key is ignored.
 
+Usage rows are plain black (white in dark mode) by default. To color them by how full
+they are instead, set `"colors": "status"` in the config file — green below half,
+amber above it.
+
 For the rest, edit the constants near the top of `claude-usage.5m.py`:
 
-- `AMBER_AT` — the % at which a window turns amber (default 50).
-- `RED_AT` — off by default (`None`): usage never goes red. Set it (e.g. `85`) if
-  you'd rather have a red tier near the ceiling.
+- `AMBER_AT` — in `status` colors, the % at which a window turns amber (default 50).
+- `RED_AT` — in `status` colors, off by default (`None`): nothing goes red. Set it
+  (e.g. `85`) for a red tier near the ceiling.
 - `CACHE_TTL` — cache lifetime in seconds (keep ≥ 180 to avoid 429s).
 - `STALE_MAX` — how long a cached reading may stand in for a live one when a fetch
   fails (default 30 min). Past it the numbers are dropped and the cache file deleted.
