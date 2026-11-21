@@ -13,7 +13,7 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳ P 96% · 54%   W 40% · 80%    ← menu bar: session · weekly, per account
+✳◑ P 96% · 54%   W 40% · 80%   ← logo, session pie, then session · weekly per account
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -39,6 +39,10 @@ Accounts
   mistaken for the other. With one account it's just the two numbers; with several,
   each pair gets the account's initial (`W 2% · 30%   P 5% · 10%`). Reset times,
   per-model caps and extra-usage credits are in the dropdown.
+- **Session pie** — beside the logo, a small pie fills clockwise from 12 as your
+  5-hour session runs, like a clock face. A full disc means it's about to reset; an
+  empty one means a fresh session, or none running. With several accounts it follows
+  the first one in the menu bar. It's monochrome, so macOS tints it with the menu bar.
 - **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
   admins may be able to read your Claude Code sessions), you get one macOS
   notification. Nothing else about it shows anywhere.
