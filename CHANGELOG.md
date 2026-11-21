@@ -20,7 +20,8 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Week ring.** After the numbers, a ring of 7 day-segments shows how far the week
   is through its 7-day window, filling clockwise from 12 like the pie: bright days
   are gone, dim ones still to come, and a full ring means the weekly limit is about
-  to reset. SwiftBar only draws an image *before* an item's text, so with one account
+  to reset. It sits a tad smaller than the pie (15pt to its 18pt) with the same 2pt
+  stroke, so the session leads and the week follows. SwiftBar only draws an image *before* an item's text, so with one account
   in the menu bar the whole title — pie, numbers, ring — is now one template image,
   the numbers set from a small glyph atlas of Inter SemiBold matched to the menu
   bar's own text (16px digits, within 3px of the width macOS sets them at), with the

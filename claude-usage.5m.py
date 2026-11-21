@@ -884,9 +884,9 @@ def _image_param(b64):
 
 WEEK_SECONDS = 7 * 86400
 WEEK_RING = True    # the 7-day ring after the numbers; False keeps macOS's own text
-RING_PX = 36        # same size as the pie
-RING_BAND = 5       # thickness of the day segments, 2.5pt
-RING_DAY_GAP = 3.0  # between days, along the ring
+RING_PX = 30        # a tad smaller than the pie (36): the session leads, the week follows
+RING_BAND = 4       # thickness of the day segments, 2pt, like the pie's outline
+RING_DAY_GAP = 2.5  # between days, along the ring
 RING_DIM = 0.32     # days still to come
 TEXT_GAP = 15       # pie -> numbers and numbers -> ring, ink to ink (7.5pt)
 

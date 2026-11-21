@@ -1047,6 +1047,9 @@ def test_drawn_title_is_the_plain_title_redrawn():
     assert [r[x_text:x_text + tw] for r in alpha[top:top + m.GLYPH_H]] == glyphs
     rows = [y for y, r in enumerate(alpha) if any(r[x_text:x_text + tw])]
     assert abs((rows[0] + rows[-1] + 1) / 2 - h / 2) <= 1, rows      # level with the pie
+    rows = [y for y, r in enumerate(alpha) if any(r[x_ring:])]
+    assert (rows[0] + rows[-1] + 1) / 2 == h / 2, rows                # the ring too…
+    assert m.RING_PX < m.PIE_PX                                        # …a tad smaller
 
     def inked(x0, x1):
         return any(a for r in alpha for a in r[x0:x1])
