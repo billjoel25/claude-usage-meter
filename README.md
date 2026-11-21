@@ -13,7 +13,7 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳◑ P 96% · 54%   W 40% · 80%   ← logo, session pie, then session · weekly per account
+◑ P 96% · 54%   W 40% · 80%    ← session pie, then session · weekly per account
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -39,10 +39,10 @@ Accounts
   mistaken for the other. With one account it's just the two numbers; with several,
   each pair gets the account's initial (`W 2% · 30%   P 5% · 10%`). Reset times,
   per-model caps and extra-usage credits are in the dropdown.
-- **Session pie** — beside the logo, a small pie fills clockwise from 12 as your
-  5-hour session runs, like a clock face. A full disc means it's about to reset; an
-  empty one means a fresh session, or none running. With several accounts it follows
-  the first one in the menu bar. It's monochrome, so macOS tints it with the menu bar.
+- **Session pie** — before the numbers, a pie fills clockwise from 12 as your 5-hour
+  session runs, like a clock face. A full disc means it's about to reset; an empty
+  one means a fresh session, or none running. With several accounts it follows the
+  first one in the menu bar. It's monochrome, so macOS tints it with the menu bar.
 - **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
   admins may be able to read your Claude Code sessions), you get one macOS
   notification. Nothing else about it shows anywhere.
@@ -230,6 +230,7 @@ For the rest, edit the constants near the top of `claude-usage.5m.py`:
 - `CACHE_TTL` — cache lifetime in seconds (keep ≥ 180 to avoid 429s).
 - `STALE_MAX` — how long a cached reading may stand in for a live one when a fetch
   fails (default 30 min). Past it the numbers are dropped and the cache file deleted.
+- `MENU_LOGO` — show the Claude logo in front of the pie (off by default).
 - Rename the file's `.5m.` segment to change the refresh interval.
 
 ## Troubleshooting

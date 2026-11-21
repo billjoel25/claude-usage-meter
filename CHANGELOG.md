@@ -7,14 +7,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- **Session pie.** Beside the logo, a small pie shows how far the session is
-  through its 5-hour window: the shaded slice grows clockwise from 12 like a clock
-  face, and a full disc means it's about to reset. Empty means a fresh session, or
-  none running. With several accounts it follows the first one shown. SwiftBar
-  allows one image per menu-bar item, so the pie is drawn into the same template
-  image as the logo — in plain Python (zlib + struct, no imaging library), in a few
-  milliseconds per refresh — and macOS tints it to match the menu bar. If drawing
-  ever fails, the plain logo is used instead.
+- **Session pie.** Before the numbers, a pie shows how far the session is through
+  its 5-hour window: the shaded slice grows clockwise from 12 like a clock face,
+  and a full disc means it's about to reset. Empty means a fresh session, or none
+  running. With several accounts it follows the first one shown. It takes the Claude
+  logo's place in the menu bar at the logo's visual size (18pt), with even spacing
+  before the numbers; the logo is off for now, and `MENU_LOGO = True` puts it back
+  in front of the pie. The pie is SwiftBar's one image for the item, drawn in plain
+  Python (zlib + struct, no imaging library) in a few milliseconds per refresh, and
+  macOS tints it to match the menu bar. If drawing ever fails, the numbers show on
+  their own.
 - **Plan-change notification.** If your Claude org ever moves off Team — to
   Enterprise, where admins may be able to read your Claude Code sessions — you get
   a single macOS notification, sent through SwiftBar. Nothing shows in the menu bar

@@ -804,8 +804,10 @@ def test_pie_fills_clockwise_from_twelve():
         t = math.radians(degrees_from_12)
         return alpha[int(c - radius * math.cos(t))][int(c + radius * math.sin(t))]
 
-    inside = 4                       # well within the slice (radius 6.5px)
-    rim = 11                         # on the outline (9.5..12.5px)
+    r_out = c - 0.5                                  # the pie's geometry, from its constants
+    r_in = r_out - m.PIE_RING
+    inside = (r_in - m.PIE_GAP) * 0.6                # well within the slice
+    rim = (r_in + r_out) / 2                         # the middle of the outline
 
     empty = m._pie_alpha(s, None)
     assert at(empty, 0, rim) == 1 and at(empty, 0, 0) == 0      # outline only
@@ -847,9 +849,10 @@ def test_menu_bar_title_carries_the_pie():
     icon = first.split("templateImage=", 1)[1].split()[0]
     assert icon != m.CLAUDE_ICON
     w, h, rows = m._png_decode_rgba(base64.b64decode(icon))
-    assert (w, h) == (52 + m.PIE_SPACE + m.PIE_PX, 40), (w, h)
-    pie = [rows[y][(52 + m.PIE_SPACE) * 4:] for y in range(h)]
-    assert any(row[i] for row in pie for i in range(3, len(row), 4))   # pie pixels present
+    assert (w, h) == (m.PIE_PX + m.PIE_PAD, m.PIE_PX), (w, h)     # the pie alone, no logo
+    alpha = [[row[i] for i in range(3, len(row), 4)] for row in rows]
+    assert any(a for r in alpha for a in r[:m.PIE_PX])           # pie pixels present
+    assert not any(a for r in alpha for a in r[m.PIE_PX:])       # padding before the numbers
 
 
 def test_menu_bar_pie_follows_the_first_account_shown():
@@ -863,20 +866,48 @@ def test_menu_bar_pie_follows_the_first_account_shown():
     assert icon == m._title_icon(first) != m._title_icon(second)
 
 
-def test_title_icon_falls_back_to_the_plain_logo():
-    saved = m.menu_icon
+def test_title_icon_failure_falls_back_quietly():
+    """If drawing the pie fails: no image while the logo is off, the plain logo
+    when it's on — and the numbers still show either way."""
+    _isolate(tempfile.mkdtemp())
+    saved = (m.menu_icon, m.MENU_LOGO)
     m.menu_icon = lambda elapsed: 1 / 0
     try:
+        assert m._title_icon({"five_hour": {"utilization": 5}}) is None
+        out = _render_main({"five_hour": {"utilization": 5}, "seven_day": {"utilization": 9}})
+        assert out.splitlines()[0].startswith("5% · 9% | size=11"), out.splitlines()[0][:40]
+        m.MENU_LOGO = True
         assert m._title_icon({"five_hour": {"utilization": 5}}) == m.CLAUDE_ICON
     finally:
-        m.menu_icon = saved
+        m.menu_icon, m.MENU_LOGO = saved
 
 
-def test_quiet_menu_bar_keeps_the_plain_logo():
-    """No session number at all -> the subtle logo alone, no pie."""
+def test_quiet_menu_bar_has_no_icon_while_the_logo_is_off():
+    """No session number at all -> just 'Claude', dim; no pie, no logo."""
     _isolate(tempfile.mkdtemp())
     out = _render_main({"seven_day": {"utilization": 60}})
-    assert f"templateImage={m.CLAUDE_ICON} " in out.splitlines()[0]
+    first = out.splitlines()[0]
+    assert first.startswith("Claude | ") and "templateImage=" not in first, first[:60]
+
+
+def test_logo_comes_back_with_the_switch():
+    """MENU_LOGO = True restores the Claude logo in front of the pie, and on the
+    quiet and welcome titles."""
+    import base64
+    _isolate(tempfile.mkdtemp())
+    saved = m.MENU_LOGO
+    m.MENU_LOGO = True
+    try:
+        w, h, _ = m._png_decode_rgba(base64.b64decode(m.menu_icon(0.5)))
+        assert (w, h) == (52 + m.PIE_SPACE + m.PIE_PX + m.PIE_PAD, 40), (w, h)
+        out = _render_main({"seven_day": {"utilization": 60}})
+        assert f"templateImage={m.CLAUDE_ICON} " in out.splitlines()[0]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            m._welcome()
+        assert f"templateImage={m.CLAUDE_ICON} " in buf.getvalue().splitlines()[0]
+    finally:
+        m.MENU_LOGO = saved
 
 
 # --------------------------------------------------- plan-change notification

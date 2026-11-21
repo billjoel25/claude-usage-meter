@@ -17,8 +17,8 @@
 # It shows how much of your Claude *plan* you've used, not dollars:
 #   • menu bar = session · weekly, e.g. "2% · 30%" — the rolling 5-hour window,
 #                then the 7-day cap (Anthropic's "seven_day"), always in that order
-#   • pie      = beside the logo, fills clockwise as the 5-hour session runs; a full
-#                disc means it's about to reset
+#   • pie      = before the numbers, fills clockwise as the 5-hour session runs; a
+#                full disc means it's about to reset
 #   • dropdown = both with their reset times, plus any per-model weekly caps and
 #                extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
@@ -709,20 +709,23 @@ def _title_pct(data):
 
 
 # --------------------------------------------------------------------- session pie
-# Beside the logo, a small pie shows how far the session is through its 5-hour
-# window. The shaded slice grows clockwise from 12, like a clock face; a full disc
-# means it's about to reset, an empty one means a fresh session (or none running).
+# Before the numbers, a pie shows how far the session is through its 5-hour window.
+# The shaded slice grows clockwise from 12, like a clock face; a full disc means it's
+# about to reset, an empty one means a fresh session (or none running).
 #
 # SwiftBar gives a plugin one image per menu-bar item, always left of the text, so
-# the pie is drawn into the same image as the logo. It's a template image: macOS
-# tints it to the menu bar's text color, white on a dark bar and black on a light
-# one. Drawn in plain Python — zlib and struct, no imaging library.
+# the pie is that image (with the Claude logo in front of it when MENU_LOGO is on).
+# It's a template image: macOS tints it to the menu bar's text color, white on a
+# dark bar and black on a light one. Drawn in plain Python — zlib and struct, no
+# imaging library.
 
 SESSION_SECONDS = 5 * 3600
-PIE_PX = 26        # 13pt across at @2x — about the height of the numbers
-PIE_RING = 3       # outline, 1.5pt
-PIE_GAP = 3        # between the outline and the slice
-PIE_SPACE = 10     # from the logo, 5pt
+MENU_LOGO = False  # the Claude logo before the pie — off for now; True brings it back
+PIE_PX = 36        # 18pt across at @2x — the same visual size the logo had
+PIE_RING = 4       # outline, 2pt
+PIE_GAP = 4        # between the outline and the slice, 2pt
+PIE_PAD = 4        # after the pie: with macOS's own spacing, ~5.5pt to the numbers
+PIE_SPACE = 10     # logo -> pie, when the logo is on
 
 
 def _png_decode_rgba(data):
@@ -822,29 +825,40 @@ def _session_elapsed(data, now=None):
 
 
 def menu_icon(elapsed):
-    """Base64 template PNG: the Claude logo, then the session pie."""
-    lw, lh, logo = _png_decode_rgba(base64.b64decode(CLAUDE_ICON))
-    w, h = lw + PIE_SPACE + PIE_PX, max(lh, PIE_PX)
+    """Base64 template PNG: the session pie with a little room after it for the
+    numbers — and the Claude logo in front when MENU_LOGO is on."""
+    lw = lh = 0
+    if MENU_LOGO:
+        lw, lh, logo = _png_decode_rgba(base64.b64decode(CLAUDE_ICON))
+    x0 = lw + PIE_SPACE if MENU_LOGO else 0
+    w, h = x0 + PIE_PX + PIE_PAD, max(lh, PIE_PX)
     canvas = [bytearray(w * 4) for _ in range(h)]
-    top = (h - lh) // 2
-    for y in range(lh):
-        canvas[top + y][0:lw * 4] = logo[y]
+    if MENU_LOGO:
+        top = (h - lh) // 2
+        for y in range(lh):
+            canvas[top + y][0:lw * 4] = logo[y]
     top = (h - PIE_PX) // 2
     for y, row in enumerate(_pie_alpha(PIE_PX, elapsed)):
         line = canvas[top + y]
         for x, cover in enumerate(row):
-            o = (lw + PIE_SPACE + x) * 4
+            o = (x0 + x) * 4
             line[o:o + 4] = bytes((0, 0, 0, int(round(cover * 255))))
     return base64.b64encode(_png_encode_rgba(w, h, canvas)).decode("ascii")
 
 
 def _title_icon(data):
-    """The logo with this account's session pie — or the plain logo if drawing it
-    fails for any reason. Decoration never takes the menu bar down."""
+    """This account's session pie — or, if drawing it fails for any reason, the
+    plain logo when MENU_LOGO is on and no image at all when it's off. Decoration
+    never takes the menu bar down."""
     try:
         return menu_icon(_session_elapsed(data))
     except Exception:
-        return CLAUDE_ICON
+        return CLAUDE_ICON if MENU_LOGO else None
+
+
+def _image_param(b64):
+    """'templateImage=<b64> ' for a menu-bar line, or '' with no image."""
+    return f"templateImage={b64} " if b64 else ""
 
 
 def account_lines(acct, res, in_bar=True):
@@ -1186,7 +1200,8 @@ def _footer(accounts=(), prefs=()):
 
 
 def _welcome():
-    print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+    print(f"Claude | {_image_param(CLAUDE_ICON if MENU_LOGO else None)}size=11 "
+          f"color={color_param('dim')}")
     print("---")
     print(f"Claude plan usage | size=12 color={color_param('dim')}")
     print("---")
@@ -1238,13 +1253,14 @@ def main():
 
     if not shown:
         # configured, but nothing readable yet — stay quiet and subtle
-        print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
+        print(f"Claude | {_image_param(CLAUDE_ICON if MENU_LOGO else None)}size=11 "
+              f"color={color_param('dim')}")
     else:
         # " · " sits inside an account (session · weekly), so accounts are set apart
         # by their initials and a wider gap: "W 2% · 30%   P 5% · 10%"
         text = shown[0][1] if len(shown) == 1 else "   ".join(f"{i} {p}" for i, p in shown)
-        # Claude logo + session pie (one template image) + numbers in the native color
-        print(f"{text} | templateImage={_title_icon(pie_data)} size=11")
+        # session pie (one template image) + numbers in the native color
+        print(f"{text} | {_image_param(_title_icon(pie_data))}size=11")
 
     print("---")
     print(f"Claude plan usage  ·  updated {datetime.now().strftime('%H:%M')} "
