@@ -724,7 +724,7 @@ MENU_LOGO = False  # the Claude logo before the pie — off for now; True brings
 PIE_PX = 36        # 18pt across at @2x — the same visual size the logo had
 PIE_RING = 4       # outline, 2pt
 PIE_GAP = 4        # between the outline and the slice, 2pt
-PIE_PAD = 4        # after the pie: with macOS's own spacing, ~5.5pt to the numbers
+PIE_PAD = 8        # after the pie: with macOS's own spacing, ~7.5pt to the numbers
 PIE_SPACE = 10     # logo -> pie, when the logo is on
 
 
