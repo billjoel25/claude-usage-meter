@@ -17,6 +17,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Python (zlib + struct, no imaging library) in a few milliseconds per refresh, and
   macOS tints it to match the menu bar. If drawing ever fails, the numbers show on
   their own.
+- **Week ring.** After the numbers, a ring of 7 day-segments shows how far the week
+  is through its 7-day window, filling clockwise from 12 like the pie: bright days
+  are gone, dim ones still to come, and a full ring means the weekly limit is about
+  to reset. SwiftBar only draws an image *before* an item's text, so with one account
+  in the menu bar the whole title — pie, numbers, ring — is now one template image,
+  the numbers set from a small glyph atlas of Inter SemiBold matched to the menu
+  bar's own text (16px digits, within 3px of the width macOS sets them at), with the
+  same 7.5pt spacing as before. The atlas is under the SIL Open Font License 1.1
+  (`licenses/Inter-OFL.txt`); `tools/make_glyph_atlas.py` regenerates it. Drawn
+  numbers can't be read by VoiceOver, so `WEEK_RING = False` brings back macOS's own
+  text, without the ring. Several accounts keep the text and the pie alone; if
+  drawing ever fails, the title falls back to the text.
 - **Plan-change notification.** If your Claude org ever moves off Team — to
   Enterprise, where admins may be able to read your Claude Code sessions — you get
   a single macOS notification, sent through SwiftBar. Nothing shows in the menu bar

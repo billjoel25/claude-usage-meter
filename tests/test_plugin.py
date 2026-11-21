@@ -54,20 +54,25 @@ def _title_of(out):
     return out.splitlines()[0].split(" | ", 1)[0]
 
 
-def _render_main(data, label="personal", extra=()):
+def _render_main(data, label="personal", extra=(), ring=False):
     """Run main() against a canned payload and return its stdout, with the account
-    lookup and the network stubbed out. `extra` adds more accounts as (label, payload)."""
+    lookup and the network stubbed out. `extra` adds more accounts as (label, payload).
+
+    ring=False turns the week ring off, so the title comes out as macOS text that
+    tests can read; the drawn title (the shipped default) has its own tests, which
+    check it shows exactly that text."""
     payloads = dict([(label, data)] + list(extra))
-    saved = (m.load_accounts, m.usage_for)
+    saved = (m.load_accounts, m.usage_for, m.WEEK_RING)
     m.load_accounts = lambda: [{"label": lbl} for lbl in payloads]
     m.usage_for = lambda acct: {"ok": True, "data": payloads[acct["label"]], "stale": False,
                                 "age": 0, "error": None, "source": "stub"}
+    m.WEEK_RING = ring
     buf = io.StringIO()
     try:
         with redirect_stdout(buf):
             m.main()
     finally:
-        m.load_accounts, m.usage_for = saved
+        m.load_accounts, m.usage_for, m.WEEK_RING = saved
     return buf.getvalue()
 
 
@@ -908,6 +913,218 @@ def test_logo_comes_back_with_the_switch():
         assert f"templateImage={m.CLAUDE_ICON} " in buf.getvalue().splitlines()[0]
     finally:
         m.MENU_LOGO = saved
+
+
+# ---------------------------------------- week ring + drawn numbers (the default)
+
+def _alpha_of(b64):
+    """(width, height, alpha rows) of a base64 template PNG."""
+    import base64
+    w, h, rows = m._png_decode_rgba(base64.b64decode(b64))
+    return w, h, [[row[i] for i in range(3, len(row), 4)] for row in rows]
+
+
+def _clock(alpha, size, degrees_from_12, radius, x0=0, y0=0):
+    """The pixel at a clock angle and distance from the centre of a size x size
+    glyph whose top-left corner sits at (x0, y0)."""
+    import math
+    c = size / 2
+    t = math.radians(degrees_from_12)
+    return alpha[y0 + int(c - radius * math.cos(t))][x0 + int(c + radius * math.sin(t))]
+
+
+def _drawn_icon(out):
+    return out.splitlines()[0].split("templateImage=", 1)[1].split()[0]
+
+
+def test_glyph_atlas_has_every_title_character():
+    """Everything the title can print — digits, '%', ' · ' — is in the atlas, each
+    cell inside it, inked, and clear of its neighbours."""
+    w, h, alpha = _alpha_of(m.GLYPH_ATLAS)
+    assert h == m.GLYPH_H
+    for ch in "0123456789%·":
+        x, cw, advance = m.GLYPHS[ch]
+        assert 0 <= x and x + cw <= w and 0 < advance <= cw, ch
+        assert any(a for row in alpha for a in row[x:x + cw]), ch
+    cells = sorted(m.GLYPHS[ch][:2] for ch in "0123456789%·")
+    assert all(a[0] + a[1] <= b[0] for a, b in zip(cells, cells[1:]))
+    assert m.GLYPHS[" "][2] > 0                          # a space only advances
+
+
+def test_drawn_numbers_match_the_menu_bar_text():
+    """'52% · 38%' as macOS sets it in the menu bar measures 112 x 16 px; the drawn
+    one must stay that size. Pinned, so changing the atlas is a deliberate act."""
+    import hashlib
+    w, rows = m._text_alpha("52% · 38%")
+    assert len(rows) == m.GLYPH_H and all(len(r) == w for r in rows)
+    inked = [y for y, r in enumerate(rows) if any(r)]
+    assert inked[-1] + 1 - inked[0] == 16, inked         # 16px digits: 11pt at @2x
+    assert abs(w - 112) <= 4, w
+    assert hashlib.sha256(bytes(v for r in rows for v in r)).hexdigest() == \
+        "5a2cf7faaeaedab90aff2719f753e3f55a238067937e26b7c2af76b08e4fdb2f"
+
+
+def test_plugin_carries_the_glyph_license():
+    """The installer copies the plugin file alone, so the atlas's OFL travels inside
+    it — word for word what licenses/Inter-OFL.txt says."""
+    lines = open(PLUGIN, encoding="utf-8").read().split("\n")
+    start = lines.index("# >>> licenses/Inter-OFL.txt") + 1
+    carried = "\n".join(ln[2:] if ln.startswith("# ") else ln.lstrip("#") for ln in lines[start:])
+    with open(os.path.join(HERE, "..", "licenses", "Inter-OFL.txt"), encoding="utf-8") as f:
+        assert carried.strip() == f.read().strip()
+    assert "Copyright 2016-2023 The Inter Project Authors" in carried
+    assert "SIL OPEN FONT LICENSE" in carried
+
+
+def test_text_alpha_unknown_characters_advance_like_a_space():
+    assert m._text_alpha("5?5") == m._text_alpha("5 5")
+    assert m._text_alpha("") == (0, [[] for _ in range(m.GLYPH_H)])
+    assert m._text_alpha("   ")[0] == 0
+
+
+def test_week_elapsed():
+    now = 1_800_000_000
+
+    def seven(left_s):
+        from datetime import datetime, timezone
+        iso = datetime.fromtimestamp(now + left_s, timezone.utc).isoformat()
+        return {"seven_day": {"utilization": 9, "resets_at": iso}}
+
+    assert abs(m._week_elapsed(seven(3.5 * 86400), now) - 0.5) < 1e-9     # 3d 12h left
+    assert m._week_elapsed(seven(m.WEEK_SECONDS + 60), now) == 0.0        # clamped
+    assert m._week_elapsed(seven(-60), now) is None             # already reset
+    assert m._week_elapsed({"seven_day": {"utilization": 9}}, now) is None
+    # the session's clock never stands in for the week's
+    assert m._week_elapsed({"five_hour": {"utilization": 9,
+                                          "resets_at": "2099-01-01T00:00:00Z"}}, now) is None
+    assert m._week_elapsed(["unexpected"], now) is None
+
+
+def test_day_ring_fills_a_day_at_a_time_from_twelve():
+    """Seven segments, 12 o'clock first and clockwise: the part of the week gone is
+    bright, the rest dim, with a clear gap between days and nothing in the middle."""
+    s = m.RING_PX
+    mid = s / 2 - 0.5 - m.RING_BAND / 2                  # the middle of the band
+    day = 360 / 7
+
+    def at(alpha, deg, radius=mid):
+        return _clock(alpha, s, deg, radius)
+
+    def dim(v):
+        return abs(v - m.RING_DIM) < 1e-6
+
+    fresh = m._day_ring_alpha(s, None)
+    assert all(dim(at(fresh, (k + 0.5) * day)) for k in range(7))     # all still to come
+    assert all(at(fresh, k * day) == 0 for k in range(7))             # gaps between days
+    assert at(fresh, 0, 0) == 0 and at(fresh, 0, mid - m.RING_BAND) == 0   # hollow
+    assert m._day_ring_alpha(s, 0.0) == fresh
+    half = m._day_ring_alpha(s, 0.5)                     # 3½ days gone
+    assert all(at(half, (k + 0.5) * day) == 1 for k in range(3))
+    assert all(dim(at(half, (k + 0.5) * day)) for k in range(4, 7))
+    assert at(half, 3.3 * day) == 1 and dim(at(half, 3.7 * day))      # midway through day 4
+    full = m._day_ring_alpha(s, 1.0)                     # the weekly reset is due
+    assert all(at(full, (k + 0.5) * day) == 1 for k in range(7))
+
+
+def test_drawn_title_is_the_plain_title_redrawn():
+    """Shipped default, one account: pie, numbers and week ring as one template
+    image — and the numbers are exactly the text the plain title would show."""
+    assert m.WEEK_RING is True
+    _isolate(tempfile.mkdtemp())
+    data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 96},
+            "seven_day_opus": {"utilization": 99}}
+    text = _title_of(_render_main(data))
+    assert text == "20% · 96%", text
+    first = _render_main(data, ring=True).splitlines()[0]
+    assert first == f"| templateImage={m.title_image(data, text)}", first[:60]
+
+    w, h, alpha = _alpha_of(_drawn_icon(first))
+    tw, glyphs = m._text_alpha(text)
+    x_text = m.PIE_PX + m.TEXT_GAP
+    x_ring = x_text + tw + m.TEXT_GAP
+    assert (w, h) == (x_ring + m.RING_PX, m.PIE_PX), (w, h)
+    top = h // 2 - m.GLYPH_CAP_MID
+    assert [r[x_text:x_text + tw] for r in alpha[top:top + m.GLYPH_H]] == glyphs
+    rows = [y for y, r in enumerate(alpha) if any(r[x_text:x_text + tw])]
+    assert abs((rows[0] + rows[-1] + 1) / 2 - h / 2) <= 1, rows      # level with the pie
+
+    def inked(x0, x1):
+        return any(a for r in alpha for a in r[x0:x1])
+
+    assert inked(0, m.PIE_PX) and inked(x_ring, w)               # pie, ring
+    assert not inked(m.PIE_PX, x_text) and not inked(x_text + tw, x_ring)   # the gaps
+    # pie -> numbers -> ring, ink to ink: the 15px (7.5pt) the pie already had from
+    # the numbers in macOS's own text, so switching over moves nothing
+    cols = [x for x in range(w) if inked(x, x + 1)]
+    gaps = [b - a - 1 for a, b in zip(cols, cols[1:]) if b - a > 1]
+    assert gaps[0] == gaps[-1] == 15, gaps
+
+
+def test_drawn_title_leaves_the_ring_off_without_a_weekly():
+    _isolate(tempfile.mkdtemp())
+    out = _render_main({"five_hour": {"utilization": 5}}, ring=True)
+    w, h, _ = _alpha_of(_drawn_icon(out))
+    assert (w, h) == (m.PIE_PX + m.TEXT_GAP + m._text_alpha("5%")[0], m.PIE_PX), (w, h)
+
+
+def test_drawn_ring_follows_the_weekly_reset():
+    """3½ days to the weekly reset: the ring's right half is bright and its left
+    dim — the week's own clock, whatever the session's says."""
+    import datetime as dt
+    _isolate(tempfile.mkdtemp())
+    now = dt.datetime.now(dt.timezone.utc)
+    data = {"five_hour": {"utilization": 5,
+                          "resets_at": (now + dt.timedelta(minutes=30)).isoformat()},
+            "seven_day": {"utilization": 9,
+                          "resets_at": (now + dt.timedelta(days=3.5)).isoformat()}}
+    w, h, alpha = _alpha_of(_drawn_icon(_render_main(data, ring=True)))
+    mid = m.RING_PX / 2 - 0.5 - m.RING_BAND / 2
+    day = 360 / 7
+
+    def ring(deg):
+        return _clock(alpha, m.RING_PX, deg, mid, x0=w - m.RING_PX, y0=(h - m.RING_PX) // 2)
+
+    assert ring(1.5 * day) == 255, ring(1.5 * day)
+    assert ring(5.5 * day) == round(255 * m.RING_DIM), ring(5.5 * day)
+
+
+def test_drawn_title_only_for_one_account_with_a_session():
+    """Several accounts keep macOS's own text after the pie, initials and all, with
+    no ring; the quiet title stays just 'Claude'."""
+    _isolate(tempfile.mkdtemp())
+    out = _render_main({"five_hour": {"utilization": 40}, "seven_day": {"utilization": 10}},
+                       label="work", extra=[("personal", {"five_hour": {"utilization": 5}})],
+                       ring=True)
+    assert out.splitlines()[0].startswith("W 40% · 10%   P 5% | templateImage="), \
+        out.splitlines()[0][:60]
+    out = _render_main({"seven_day": {"utilization": 60}}, ring=True)
+    assert _title_of(out).strip() == "Claude", _title_of(out)
+
+
+def test_drawn_title_failure_falls_back_to_macos_text():
+    _isolate(tempfile.mkdtemp())
+    saved = m.title_image
+    m.title_image = lambda data, text: 1 / 0
+    try:
+        out = _render_main({"five_hour": {"utilization": 5}, "seven_day": {"utilization": 9}},
+                           ring=True)
+    finally:
+        m.title_image = saved
+    first = out.splitlines()[0]
+    assert first.startswith("5% · 9% | templateImage="), first[:40]      # pie + text
+
+
+def test_drawn_title_puts_the_logo_first_with_the_switch():
+    saved = m.MENU_LOGO
+    m.MENU_LOGO = True
+    try:
+        w, h, _ = _alpha_of(m.title_image({"five_hour": {"utilization": 5},
+                                           "seven_day": {"utilization": 9}}, "5% · 9%"))
+    finally:
+        m.MENU_LOGO = saved
+    tw = m._text_alpha("5% · 9%")[0]
+    assert (w, h) == (52 + m.PIE_SPACE + m.PIE_PX + m.TEXT_GAP + tw + m.TEXT_GAP + m.RING_PX,
+                      40), (w, h)
 
 
 # --------------------------------------------------- plan-change notification

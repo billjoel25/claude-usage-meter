@@ -13,7 +13,8 @@ It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-◑ P 96% · 54%   W 40% · 80%    ← session pie, then session · weekly per account
+◑ 96% · 54% ◌                  ← session pie, session · weekly, week ring (one account)
+◑ P 96% · 54%   W 40% · 80%    ← with several: session · weekly per account
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -43,6 +44,14 @@ Accounts
   session runs, like a clock face. A full disc means it's about to reset; an empty
   one means a fresh session, or none running. With several accounts it follows the
   first one in the menu bar. It's monochrome, so macOS tints it with the menu bar.
+- **Week ring** — after the numbers, a ring of 7 day-segments fills the same way as
+  the weekly window runs: bright days are gone, dim ones still to come, and a full
+  ring means the weekly limit is about to reset. It shows with one account in the
+  menu bar; with several, the title stays as text. (SwiftBar can only put a picture
+  *before* the text, so to get the ring after the numbers the whole title is drawn
+  as one image, the numbers included, in a font matched to the menu bar's own.
+  VoiceOver can't read drawn numbers — `WEEK_RING = False` in [Tuning](#tuning)
+  brings back plain text, without the ring.)
 - **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
   admins may be able to read your Claude Code sessions), you get one macOS
   notification. Nothing else about it shows anywhere.
@@ -231,6 +240,8 @@ For the rest, edit the constants near the top of `claude-usage.5m.py`:
 - `STALE_MAX` — how long a cached reading may stand in for a live one when a fetch
   fails (default 30 min). Past it the numbers are dropped and the cache file deleted.
 - `MENU_LOGO` — show the Claude logo in front of the pie (off by default).
+- `WEEK_RING` — the 7-day ring after the numbers (on by default). `False` puts the
+  numbers back in macOS's own text, which VoiceOver can read, and drops the ring.
 - Rename the file's `.5m.` segment to change the refresh interval.
 
 ## Troubleshooting
@@ -264,4 +275,6 @@ Other tools in this space worth a look: the native apps
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The menu-bar numbers are drawn from glyphs rendered
+from the [Inter](https://github.com/rsms/inter) typeface, which stay under the SIL
+Open Font License 1.1 — see [licenses/Inter-OFL.txt](licenses/Inter-OFL.txt).
