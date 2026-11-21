@@ -15,7 +15,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   since the string an Enterprise org reports isn't known. A file it can't read is
   skipped, never reported as a change. `notify-test` checks that macOS will show it.
 - **Account order and menu-bar on/off.** A new **Accounts** submenu in the
-  dropdown: click an account to show or hide its number in the menu bar, or move
+  dropdown: click an account to show or hide its numbers in the menu bar, or move
   it up/down. The order applies to the menu bar *and* the dropdown sections. A
   hidden account keeps its full section in the dropdown — usage rows, reset
   times, sign out — marked *hidden from menu bar*, so nothing is lost from view.
@@ -47,17 +47,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cache)** remains, but is no longer something you have to remember to click. A
   cache file that won't parse is now cleaned up the same way, and signing an
   account back in drops its old cache so a re-add starts clean.
-- **The menu bar now shows only your current session** — the rolling 5-hour window.
-  A higher weekly or per-model (Opus/Sonnet) number no longer replaces it, and the
-  **⚠** cross-window marker is gone, so the number up top is always the one window.
-  The dropdown is unchanged: it still lists the weekly cap, per-model caps and
-  extra-usage credits, and each account's status dot still reflects the worst of
-  them, so a limit can't max out entirely unseen.
+- **The menu bar shows session · weekly, in fixed positions** — `2% · 30%`: the
+  rolling 5-hour window first, the 7-day cap second, always in that order. The old
+  single number could quietly switch to the weekly (or an Opus cap) when that was
+  higher, so you couldn't tell which window you were reading; now each has its own
+  place. Per-model caps stay in the dropdown, and the **⚠** cross-window marker is
+  gone. With several accounts, each pair carries the account's initial and
+  accounts are set apart by a wider gap (`W 2% · 30%   P 5% · 10%`), since ` · `
+  now joins the two numbers within one account.
 - The dropdown's `5-hour` row is now labelled `session`, matching `/usage`.
 
 ### Removed
 - The **Menu bar shows** selector (weekly / both / worst) and its `set-display`
-  action — with the menu bar fixed to the current session there is nothing to pick.
+  action — with the menu bar fixed to session · weekly there is nothing to pick.
   The `"menu_bar"` config key is no longer read; a leftover one is ignored, not
   rewritten, and new starter configs omit it.
 

@@ -6,14 +6,14 @@
 [![CI](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/billjoel25/claude-usage-meter/actions/workflows/ci.yml)
 
 A tiny macOS **menu-bar** widget that shows how much of your **Claude plan** you've
-used — your **current session** (the rolling 5-hour window) at a glance, with the
-weekly and per-model limits one click away — for one or more accounts.
+used — your **current session** and your **weekly limit**, side by side at a glance,
+with reset times and per-model limits one click away — for one or more accounts.
 
 It shows **plan usage**: the exact percentages Claude's own `/usage` shows and
 enforces on **Pro / Max / Team** — **not** API dollar cost.
 
 ```
-✳ P 96%  · W 40%         ← menu bar (always the current session)
+✳ P 96% · 54%   W 40% · 80%    ← menu bar: session · weekly, per account
 ────────────────────────
 personal
   session [█████████░] 96%  resets in 47m
@@ -32,12 +32,13 @@ Accounts
 
 - **Sign in with Claude** — one click, browser login, no CLI. Add several accounts.
 - **Choose which accounts appear, and in what order** — dropdown → **Accounts**: click
-  one to show or hide its number in the menu bar, or move it up/down. A hidden account
+  one to show or hide its numbers in the menu bar, or move it up/down. A hidden account
   keeps its full section in the dropdown, so you still see its numbers on a click.
-- **Current session only, up top** — the menu bar is always the rolling 5-hour
-  session percentage; a higher weekly or Opus number never takes its place. Open the
-  dropdown for the weekly cap, per-model caps, and extra-usage credits, where each
-  account's status dot still turns red if *any* of its windows is near the ceiling.
+- **Session and weekly, side by side** — the menu bar reads `2% · 30%`: the rolling
+  5-hour session first, the weekly cap second, always in that order, so one is never
+  mistaken for the other. With one account it's just the two numbers; with several,
+  each pair gets the account's initial (`W 2% · 30%   P 5% · 10%`). Reset times,
+  per-model caps and extra-usage credits are in the dropdown.
 - **Plan-change notice** — if your org ever moves off Team (to Enterprise, where
   admins may be able to read your Claude Code sessions), you get one macOS
   notification. Nothing else about it shows anywhere.
@@ -209,8 +210,8 @@ matches an account is ignored.
 
 ## Tuning
 
-The menu-bar number is always the current session (the rolling 5-hour window) — there
-is nothing to configure. Earlier versions had a **Menu bar shows** selector backed by a
+The menu bar always shows session · weekly — there is nothing to configure. Earlier
+versions had a **Menu bar shows** selector backed by a
 `"menu_bar"` config key; both are gone, and a leftover `"menu_bar"` key is ignored.
 
 Usage rows are plain black (white in dark mode) by default. To color them by how full

@@ -3,7 +3,7 @@
 # <xbar.version>1.2.0</xbar.version>
 # <xbar.author>billjoel25</xbar.author>
 # <xbar.author.github>billjoel25</xbar.author.github>
-# <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the current session (the rolling 5-hour window), for one or more accounts. The dropdown adds the weekly and per-model limits. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
+# <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the current session and the weekly limit side by side, for one or more accounts. The dropdown adds reset times and per-model limits. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
 # <xbar.abouturl>https://github.com/billjoel25/claude-usage-meter</xbar.abouturl>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
@@ -15,9 +15,10 @@
 #
 # Claude Plan Usage — a SwiftBar/xbar plugin. Pure Python 3, no pip installs.
 # It shows how much of your Claude *plan* you've used, not dollars:
-#   • menu bar = the current session only — the rolling 5-hour window
-#   • dropdown = that session, plus the weekly 7-day cap (Anthropic's "seven_day"),
-#                any per-model weekly caps, and extra-usage credits
+#   • menu bar = session · weekly, e.g. "2% · 30%" — the rolling 5-hour window,
+#                then the 7-day cap (Anthropic's "seven_day"), always in that order
+#   • dropdown = both with their reset times, plus any per-model weekly caps and
+#                extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
 #
 # If your Claude org ever moves off Team (to Enterprise, say), you get one macOS
@@ -690,18 +691,22 @@ def util(obj):
 
 
 def _title_pct(data):
-    """Menu-bar text for one account: the current session — the rolling 5-hour window —
-    and nothing else. Returns None when the payload carries no session number; the
-    weekly and per-model windows never stand in for it, they live in the dropdown."""
+    """Menu-bar text for one account: session, then weekly — "2% · 30%". Each number
+    keeps its place, so the weekly can never be read as the session. The weekly is
+    left off when the payload has none; None when there's no session number at all,
+    since the weekly never stands in for it. Per-model caps stay in the dropdown."""
     data = data if isinstance(data, dict) else {}
     session = util(data.get("five_hour"))[0]
-    return None if session is None else f"{round(session)}%"
+    if session is None:
+        return None
+    week = util(data.get("seven_day"))[0]
+    return f"{round(session)}%" + ("" if week is None else f" · {round(week)}%")
 
 
 def account_lines(acct, res, in_bar=True):
     """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct).
     `in_bar` is False for an account switched off in the menu bar — it still gets its
-    full section here, just a note saying why its number isn't up top."""
+    full section here, just a note saying why its numbers aren't up top."""
     label = acct.get("label", "account")
     lines = []
     worst = None
@@ -745,8 +750,8 @@ def account_lines(acct, res, in_bar=True):
             text += f"   {r}"
         lines.append(f"{text} | font=Menlo size=13 trim=false color={c}")
 
-    row("session", five_u, five_r)      # the menu-bar number: rolling 5-hour window
-    row("weekly", week_u, week_r)
+    row("session", five_u, five_r)      # menu bar's first number: rolling 5-hour window
+    row("weekly", week_u, week_r)       # …and its second: the 7-day cap
 
     # Per-model weekly limits (Max plans often meter Opus separately).
     for key, name in (("seven_day_opus", "· Opus"), ("seven_day_sonnet", "· Sonnet")):
@@ -1072,10 +1077,10 @@ def main():
         _welcome()
         return
 
-    # ---- menu bar title: the current session (rolling 5-hour) window, in the user's
-    # ---- order, for each account switched on that reports one. Weekly / per-model
-    # ---- limits — and the accounts switched off — stay in the dropdown ----
-    shown = []          # (initial, text like "42%")
+    # ---- menu bar title: session · weekly, in the user's order, for each account
+    # ---- switched on that reports a session. Per-model limits — and the accounts
+    # ---- switched off — stay in the dropdown ----
+    shown = []          # (initial, text like "42% · 30%")
     for acct, res, _, _ in rendered:
         if acct.get("label") in hidden:
             continue
@@ -1088,7 +1093,9 @@ def main():
         # configured, but nothing readable yet — stay quiet and subtle
         print(f"Claude | templateImage={CLAUDE_ICON} size=11 color={color_param('dim')}")
     else:
-        text = shown[0][1] if len(shown) == 1 else " · ".join(f"{i} {p}" for i, p in shown)
+        # " · " sits inside an account (session · weekly), so accounts are set apart
+        # by their initials and a wider gap: "W 2% · 30%   P 5% · 10%"
+        text = shown[0][1] if len(shown) == 1 else "   ".join(f"{i} {p}" for i, p in shown)
         # white Claude logo (template image) + white numbers (native color), 20% smaller
         print(f"{text} | templateImage={CLAUDE_ICON} size=11")
 
