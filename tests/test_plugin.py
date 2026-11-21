@@ -733,6 +733,152 @@ def test_windows_reset_detection():
     assert not m._windows_reset(None, time.time())
 
 
+# ---------------------------------------------------------------- session pie
+
+def _filtered_png(w, rows, kinds):
+    """An RGBA PNG whose rows use the given PNG filter types — a reference encoder,
+    so the plugin's decoder gets checked on every filter, not only the logo's."""
+    import struct as st
+    import zlib as zl
+
+    def chunk(tag, body):
+        return st.pack(">I", len(body)) + tag + body + st.pack(">I", zl.crc32(tag + body) & 0xFFFFFFFF)
+
+    out, prev = bytearray(), bytearray(w * 4)
+    for kind, row in zip(kinds, rows):
+        enc = bytearray(len(row))
+        for x in range(len(row)):
+            a = row[x - 4] if x >= 4 else 0
+            b, c = prev[x], (prev[x - 4] if x >= 4 else 0)
+            if kind == 0:
+                p = 0
+            elif kind == 1:
+                p = a
+            elif kind == 2:
+                p = b
+            elif kind == 3:
+                p = (a + b) // 2
+            else:
+                q = a + b - c
+                pa, pb, pc = abs(q - a), abs(q - b), abs(q - c)
+                p = a if pa <= pb and pa <= pc else b if pb <= pc else c
+            enc[x] = (row[x] - p) & 255
+        out += bytes([kind]) + enc
+        prev = row
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", st.pack(">IIBBBBB", w, len(rows), 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zl.compress(bytes(out))) + chunk(b"IEND", b""))
+
+
+def test_png_decoder_handles_every_filter():
+    w = 7
+    rows = [bytearray((x * 37 + y * 101 + 13) % 256 for x in range(w * 4)) for y in range(10)]
+    kinds = [0, 1, 2, 3, 4, 4, 3, 2, 1, 0]
+    dw, dh, got = m._png_decode_rgba(_filtered_png(w, rows, kinds))
+    assert (dw, dh) == (w, len(rows))
+    assert [bytes(r) for r in got] == [bytes(r) for r in rows]
+
+
+def test_png_encoder_round_trips():
+    rows = [bytearray((x * 11 + y * 29) % 256 for x in range(5 * 4)) for y in range(3)]
+    w, h, got = m._png_decode_rgba(m._png_encode_rgba(5, 3, rows))
+    assert (w, h) == (5, 3) and [bytes(r) for r in got] == [bytes(r) for r in rows]
+
+
+def test_logo_decodes_to_the_verified_pixels():
+    """Pinned to Pillow's decode of the same PNG, checked when this was written."""
+    import base64
+    import hashlib
+    w, h, rows = m._png_decode_rgba(base64.b64decode(m.CLAUDE_ICON))
+    assert (w, h) == (52, 40)
+    assert hashlib.sha256(b"".join(bytes(r) for r in rows)).hexdigest() == \
+        "85a97a11b8617cbe817bdd79dbd980caf8ec8da4510283d92847bc46197ce4bc"
+
+
+def test_pie_fills_clockwise_from_twelve():
+    import math
+    s = m.PIE_PX
+    c = s / 2
+
+    def at(alpha, degrees_from_12, radius):
+        """Coverage of the pixel at a clock angle and distance from the centre."""
+        t = math.radians(degrees_from_12)
+        return alpha[int(c - radius * math.cos(t))][int(c + radius * math.sin(t))]
+
+    inside = 4                       # well within the slice (radius 6.5px)
+    rim = 11                         # on the outline (9.5..12.5px)
+
+    empty = m._pie_alpha(s, None)
+    assert at(empty, 0, rim) == 1 and at(empty, 0, 0) == 0      # outline only
+    assert m._pie_alpha(s, 0.0) == empty                        # fresh session looks the same
+    early = m._pie_alpha(s, 0.07)                               # 7% = 25° of slice
+    assert at(early, 10, inside) == 1 and at(early, 90, inside) == 0
+    half = m._pie_alpha(s, 0.5)                                 # 12 round to 6, right side
+    assert at(half, 90, inside) == 1 and at(half, 270, inside) == 0
+    full = m._pie_alpha(s, 1.0)                                 # a full disc: reset is due
+    assert at(full, 270, inside) == 1 and at(full, 0, 0) == 1
+    for alpha in (empty, early, half, full):                    # the outline never moves
+        assert all(at(alpha, deg, rim) == 1 for deg in (0, 90, 180, 270))
+
+
+def test_session_elapsed():
+    now = 1_800_000_000
+
+    def five(left_s):
+        from datetime import datetime, timezone
+        iso = datetime.fromtimestamp(now + left_s, timezone.utc).isoformat()
+        return {"five_hour": {"utilization": 9, "resets_at": iso}}
+
+    assert abs(m._session_elapsed(five(160 * 60), now) - 140 / 300) < 1e-9   # 2h40m left
+    assert m._session_elapsed(five(m.SESSION_SECONDS + 60), now) == 0.0      # clamped
+    assert m._session_elapsed(five(-60), now) is None           # window already over
+    assert m._session_elapsed({"five_hour": {"utilization": 9}}, now) is None
+    assert m._session_elapsed(["unexpected"], now) is None
+
+
+def test_menu_bar_title_carries_the_pie():
+    import base64
+    import datetime as dt
+    _isolate(tempfile.mkdtemp())
+    soon = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=160)).isoformat()
+    out = _render_main({"five_hour": {"utilization": 22, "resets_at": soon},
+                        "seven_day": {"utilization": 33}})
+    first = out.splitlines()[0]
+    assert first.startswith("22% · 33% | templateImage="), first[:40]
+    icon = first.split("templateImage=", 1)[1].split()[0]
+    assert icon != m.CLAUDE_ICON
+    w, h, rows = m._png_decode_rgba(base64.b64decode(icon))
+    assert (w, h) == (52 + m.PIE_SPACE + m.PIE_PX, 40), (w, h)
+    pie = [rows[y][(52 + m.PIE_SPACE) * 4:] for y in range(h)]
+    assert any(row[i] for row in pie for i in range(3, len(row), 4))   # pie pixels present
+
+
+def test_menu_bar_pie_follows_the_first_account_shown():
+    import datetime as dt
+    _isolate(tempfile.mkdtemp())
+    now = dt.datetime.now(dt.timezone.utc)
+    first = {"five_hour": {"utilization": 5, "resets_at": (now + dt.timedelta(hours=4)).isoformat()}}
+    second = {"five_hour": {"utilization": 9, "resets_at": (now + dt.timedelta(minutes=20)).isoformat()}}
+    out = _render_main(first, label="work", extra=[("personal", second)])
+    icon = out.splitlines()[0].split("templateImage=", 1)[1].split()[0]
+    assert icon == m._title_icon(first) != m._title_icon(second)
+
+
+def test_title_icon_falls_back_to_the_plain_logo():
+    saved = m.menu_icon
+    m.menu_icon = lambda elapsed: 1 / 0
+    try:
+        assert m._title_icon({"five_hour": {"utilization": 5}}) == m.CLAUDE_ICON
+    finally:
+        m.menu_icon = saved
+
+
+def test_quiet_menu_bar_keeps_the_plain_logo():
+    """No session number at all -> the subtle logo alone, no pie."""
+    _isolate(tempfile.mkdtemp())
+    out = _render_main({"seven_day": {"utilization": 60}})
+    assert f"templateImage={m.CLAUDE_ICON} " in out.splitlines()[0]
+
+
 # --------------------------------------------------- plan-change notification
 
 def _watch(sent):

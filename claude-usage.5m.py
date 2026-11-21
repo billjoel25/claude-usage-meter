@@ -17,6 +17,8 @@
 # It shows how much of your Claude *plan* you've used, not dollars:
 #   • menu bar = session · weekly, e.g. "2% · 30%" — the rolling 5-hour window,
 #                then the 7-day cap (Anthropic's "seven_day"), always in that order
+#   • pie      = beside the logo, fills clockwise as the 5-hour session runs; a full
+#                disc means it's about to reset
 #   • dropdown = both with their reset times, plus any per-model weekly caps and
 #                extra-usage credits
 # These are the exact percentages Claude shows in `/usage` and enforces on Pro/Max/Team.
@@ -31,14 +33,17 @@
 # Config (optional): ~/.config/claude-usage-meter/config.json — see load_config().
 
 import json
+import math
 import os
 import ssl
+import struct
 import subprocess
 import sys
 import time
 import base64
 import hashlib
 import secrets
+import zlib
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -703,6 +708,145 @@ def _title_pct(data):
     return f"{round(session)}%" + ("" if week is None else f" · {round(week)}%")
 
 
+# --------------------------------------------------------------------- session pie
+# Beside the logo, a small pie shows how far the session is through its 5-hour
+# window. The shaded slice grows clockwise from 12, like a clock face; a full disc
+# means it's about to reset, an empty one means a fresh session (or none running).
+#
+# SwiftBar gives a plugin one image per menu-bar item, always left of the text, so
+# the pie is drawn into the same image as the logo. It's a template image: macOS
+# tints it to the menu bar's text color, white on a dark bar and black on a light
+# one. Drawn in plain Python — zlib and struct, no imaging library.
+
+SESSION_SECONDS = 5 * 3600
+PIE_PX = 26        # 13pt across at @2x — about the height of the numbers
+PIE_RING = 3       # outline, 1.5pt
+PIE_GAP = 3        # between the outline and the slice
+PIE_SPACE = 10     # from the logo, 5pt
+
+
+def _png_decode_rgba(data):
+    """(width, height, rows) for an 8-bit RGBA, non-interlaced PNG — the logo."""
+    pos, w, h, idat = 8, 0, 0, b""
+    while pos < len(data):
+        length, tag = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if tag == b"IHDR":
+            w, h, depth, ctype = struct.unpack(">IIBB", body[:10])
+            if (depth, ctype) != (8, 6):
+                raise ValueError("expected an 8-bit RGBA PNG")
+        elif tag == b"IDAT":
+            idat += body
+        elif tag == b"IEND":
+            break
+    raw, stride, rows = zlib.decompress(idat), w * 4, []
+    prev, i = bytearray(stride), 0
+    for _ in range(h):
+        kind, line = raw[i], bytearray(raw[i + 1:i + 1 + stride])
+        i += 1 + stride
+        for x in range(stride):               # undo the PNG row filter in place
+            a = line[x - 4] if x >= 4 else 0
+            b = prev[x]
+            c = prev[x - 4] if x >= 4 else 0
+            if kind == 1:
+                line[x] = (line[x] + a) & 255
+            elif kind == 2:
+                line[x] = (line[x] + b) & 255
+            elif kind == 3:
+                line[x] = (line[x] + (a + b) // 2) & 255
+            elif kind == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(line)
+        prev = line
+    return w, h, rows
+
+
+def _png_encode_rgba(w, h, rows, dpi=144):
+    """RGBA rows -> PNG bytes. 144 dpi makes macOS draw it at @2x, like the logo."""
+    def chunk(tag, body):
+        return (struct.pack(">I", len(body)) + tag + body
+                + struct.pack(">I", zlib.crc32(tag + body) & 0xFFFFFFFF))
+    ppm = round(dpi / 0.0254)
+    raw = b"".join(b"\x00" + bytes(row) for row in rows)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1))
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+def _pie_alpha(size, elapsed, ring=PIE_RING, gap=PIE_GAP, ss=4):
+    """size x size coverage (0..1): a full outline, and inside it a slice growing
+    clockwise from 12 for `elapsed` (0..1) of the circle; None draws the outline
+    alone. Each pixel is sampled ss x ss times so the edges come out smooth."""
+    c = size / 2.0
+    r_out = c - 0.5
+    r_in = r_out - ring
+    r_slice = r_in - gap
+    e = 0.0 if elapsed is None else max(0.0, min(1.0, elapsed))
+    end = e * 2 * math.pi
+    out = []
+    for y in range(size):
+        row = []
+        for x in range(size):
+            hit = 0
+            for sy in range(ss):
+                dy = y + (sy + 0.5) / ss - c
+                for sx in range(ss):
+                    dx = x + (sx + 0.5) / ss - c
+                    d = math.hypot(dx, dy)
+                    if r_in <= d <= r_out:
+                        hit += 1
+                    elif d <= r_slice and e > 0 and \
+                            (e >= 0.999 or math.atan2(dx, -dy) % (2 * math.pi) <= end):
+                        hit += 1
+            row.append(hit / (ss * ss))
+        out.append(row)
+    return out
+
+
+def _session_elapsed(data, now=None):
+    """How far the session is through its 5-hour window (0..1), or None when none is
+    running — no reset time, or one that has already passed."""
+    data = data if isinstance(data, dict) else {}
+    when = _iso_epoch(util(data.get("five_hour"))[1])
+    if when is None:
+        return None
+    left = when - (time.time() if now is None else now)
+    if left <= 0:
+        return None
+    return max(0.0, min(1.0, 1 - left / SESSION_SECONDS))
+
+
+def menu_icon(elapsed):
+    """Base64 template PNG: the Claude logo, then the session pie."""
+    lw, lh, logo = _png_decode_rgba(base64.b64decode(CLAUDE_ICON))
+    w, h = lw + PIE_SPACE + PIE_PX, max(lh, PIE_PX)
+    canvas = [bytearray(w * 4) for _ in range(h)]
+    top = (h - lh) // 2
+    for y in range(lh):
+        canvas[top + y][0:lw * 4] = logo[y]
+    top = (h - PIE_PX) // 2
+    for y, row in enumerate(_pie_alpha(PIE_PX, elapsed)):
+        line = canvas[top + y]
+        for x, cover in enumerate(row):
+            o = (lw + PIE_SPACE + x) * 4
+            line[o:o + 4] = bytes((0, 0, 0, int(round(cover * 255))))
+    return base64.b64encode(_png_encode_rgba(w, h, canvas)).decode("ascii")
+
+
+def _title_icon(data):
+    """The logo with this account's session pie — or the plain logo if drawing it
+    fails for any reason. Decoration never takes the menu bar down."""
+    try:
+        return menu_icon(_session_elapsed(data))
+    except Exception:
+        return CLAUDE_ICON
+
+
 def account_lines(acct, res, in_bar=True):
     """Yield SwiftBar dropdown lines for one account. Returns (lines, worst_pct).
     `in_bar` is False for an account switched off in the menu bar — it still gets its
@@ -1081,6 +1225,7 @@ def main():
     # ---- switched on that reports a session. Per-model limits — and the accounts
     # ---- switched off — stay in the dropdown ----
     shown = []          # (initial, text like "42% · 30%")
+    pie_data = None     # the first shown account's payload drives the session pie
     for acct, res, _, _ in rendered:
         if acct.get("label") in hidden:
             continue
@@ -1088,6 +1233,8 @@ def main():
         if text is not None:
             label = acct.get("label", "?")
             shown.append((label[0].upper() if label else "?", text))
+            if pie_data is None:
+                pie_data = res["data"]
 
     if not shown:
         # configured, but nothing readable yet — stay quiet and subtle
@@ -1096,8 +1243,8 @@ def main():
         # " · " sits inside an account (session · weekly), so accounts are set apart
         # by their initials and a wider gap: "W 2% · 30%   P 5% · 10%"
         text = shown[0][1] if len(shown) == 1 else "   ".join(f"{i} {p}" for i, p in shown)
-        # white Claude logo (template image) + white numbers (native color), 20% smaller
-        print(f"{text} | templateImage={CLAUDE_ICON} size=11")
+        # Claude logo + session pie (one template image) + numbers in the native color
+        print(f"{text} | templateImage={_title_icon(pie_data)} size=11")
 
     print("---")
     print(f"Claude plan usage  ·  updated {datetime.now().strftime('%H:%M')} "
