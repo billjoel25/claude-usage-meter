@@ -6,10 +6,12 @@
 # <xbar.desc>Live Claude Pro/Max/Team plan usage in the menu bar - the current session (the rolling 5-hour window), for one or more accounts. The dropdown adds the weekly and per-model limits. Sign in with Claude (no CLI needed); shows the same server-truth numbers Claude enforces. Not API $ cost.</xbar.desc>
 # <xbar.dependencies>python3</xbar.dependencies>
 # <xbar.abouturl>https://github.com/billjoel25/claude-usage-meter</xbar.abouturl>
-# <swiftbar.hideAbout>false</swiftbar.hideAbout>
+# <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
-# <swiftbar.hideLastUpdated>false</swiftbar.hideLastUpdated>
-# <swiftbar.hideDisablePlugin>false</swiftbar.hideDisablePlugin>
+# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
+# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
+# <swiftbar.hideSwiftBar>true</swiftbar.hideSwiftBar>
+# (SwiftBar's own menu items are hidden; Option+Click the menu to show them.)
 #
 # Claude Plan Usage — a SwiftBar/xbar plugin. Pure Python 3, no pip installs.
 # It shows how much of your Claude *plan* you've used, not dollars:
@@ -151,8 +153,8 @@ def load_config():
 
 
 def _ensure_config():
-    """Create a documented, empty starter config the first time so 'Edit config file'
-    always opens something real. Empty `accounts` keeps the onboarding + auto-detect
+    """Create a documented, empty starter config the first time, so there's a real
+    file to edit by hand for the optional settings. Empty `accounts` keeps the onboarding + auto-detect
     paths intact — signed-in accounts and CLI logins are found without this file."""
     if any(os.path.exists(c) for c in config_candidates()):
         return
@@ -710,8 +712,8 @@ def account_lines(acct, res, in_bar=True):
                      f"| sfimage=circle.dashed sfcolor={sf('dim')} color={color_param('dim')} "
                      f"font=Menlo-Bold size=13 trim=false")
         auth = any(k in err for k in ("401", "sign-in", "logged in", "token"))
-        hint = ("Not logged into this account, or credentials unreachable. "
-                "See 'About / setup'." if auth else
+        hint = ("Not logged into this account, or credentials unreachable — "
+                "sign it in again with ➕ Add Claude account." if auth else
                 "No live reading, and the cached numbers had expired — better nothing "
                 "than something wrong.")
         lines.append(f"-- {hint} | color={color_param('dim')} size=12")
@@ -1032,17 +1034,6 @@ def _footer(accounts=(), prefs=()):
     print("Force refresh (clear cache) | bash=/bin/rm param1=-rf "
           f'param2="{CACHE_DIR}" terminal=false refresh=true')
     _accounts_menu(plugin, accounts, prefs)
-    print("About / setup")
-    print("-- Shows your Claude *plan* usage — the same percentages `/usage`")
-    print("-- shows, not API dollar cost. The menu bar is your current session")
-    print("-- (the rolling 5-hour window); weekly and per-model limits are here.")
-    print("-- Sign in via the menu, or an existing Claude Code login is auto-detected.")
-    print("-- Source: Anthropic’s plan-usage endpoint (api.anthropic.com/api/oauth/usage).")
-    print("-- Numbers are cached ~3 min to respect the rate limit.")
-    print(f"-- Config: {config_path()}")
-    print("-- | size=12")
-    print(f'-- Edit config file | bash=/usr/bin/open param1=-t param2="{config_path()}" terminal=false')
-    print("-- Project on GitHub | href=https://github.com/billjoel25/claude-usage-meter")
 
 
 def _welcome():

@@ -508,10 +508,33 @@ def test_footer_quotes_paths():
     with redirect_stdout(buf):
         m._footer()
     out = buf.getvalue()
-    # rm/open actions must quote param2 so spaces in the path don't break them
+    # the rm action must quote param2 so a space in the path doesn't break it
     assert 'param2="' in out
     assert "Menu bar shows" not in out    # window selector removed
     assert "set-display" not in out
+
+
+def test_footer_is_just_the_actions():
+    """No About / setup submenu, config path, or project link — only things to do."""
+    _isolate(tempfile.mkdtemp())
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        m._footer([{"label": "Work"}], [])
+    titles = [ln.split(" | ")[0].strip() for ln in buf.getvalue().splitlines()
+              if not ln.startswith("--")]            # top-level items only
+    assert titles == ["➕ Add Claude account…", "Refresh now",
+                      "Force refresh (clear cache)", "Accounts"], titles
+    for gone in ("About / setup", "Edit config file", "Project on GitHub", "Config:"):
+        assert gone not in buf.getvalue(), gone
+
+
+def test_swiftbar_default_items_hidden():
+    """SwiftBar appends About, Updated N ago, Disable Plugin, Run in Terminal and its
+    own submenu to every plugin's menu unless the header says not to."""
+    header = open(PLUGIN, encoding="utf-8").read().split("\nimport ", 1)[0]
+    for tag in ("hideAbout", "hideRunInTerminal", "hideLastUpdated",
+                "hideDisablePlugin", "hideSwiftBar"):
+        assert f"<swiftbar.{tag}>true</swiftbar.{tag}>" in header, tag
 
 
 # ------------------------------------------- cache: expires and clears on its own
