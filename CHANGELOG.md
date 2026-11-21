@@ -25,6 +25,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mention follow at the end and are shown, so the key stays optional.
 
 ### Changed
+- **A shorter dropdown.** The plugin's **About / setup** submenu is gone, and so
+  are the items SwiftBar adds to every plugin's menu — its **SwiftBar** submenu,
+  **Updated N Seconds Ago**, **Disable Plugin** and **About** — hidden through the
+  `swiftbar.hide*` header tags. What's left is your usage and the things you act
+  on. Option+Click the menu still shows SwiftBar's hidden items.
 - **Usage is plain black text.** No traffic-light colors on the rows, the bars, the
   account header or its error line, however close a window is to its limit — a
   weekly window at 85% with a day and a half still to run had lit the dropdown up
