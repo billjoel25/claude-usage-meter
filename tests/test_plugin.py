@@ -235,17 +235,25 @@ def test_sign_out_only_for_oauth():
     assert not any("sign out" in ln for ln in manual_lines)
 
 
-# -------------------------------------------- menu bar: current session only
+# ------------------------------------------------ menu bar: session · weekly
 
-def test_title_pct_is_session_only():
-    """The menu-bar number is the rolling 5-hour window and nothing else — a higher
-    weekly or per-model cap never replaces it, and never tacks a ⚠ onto it."""
+def test_title_pct_is_session_then_weekly():
+    """'2% · 30%': session first, weekly second, always in that order, so a higher
+    weekly can never be read as the session. Per-model caps never appear, and no ⚠."""
     data = {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 90},
             "seven_day_opus": {"utilization": 99}}
-    assert m._title_pct(data) == "20%"
+    assert m._title_pct(data) == "20% · 90%"
+    assert m._title_pct({"five_hour": {"utilization": 2.4},
+                         "seven_day": {"utilization": 29.6}}) == "2% · 30%"
     # …including when every other window is pinned at the ceiling
     assert m._title_pct({"five_hour": {"utilization": 3}, "seven_day": {"utilization": 100},
-                         "seven_day_opus": {"utilization": 100}}) == "3%"
+                         "seven_day_opus": {"utilization": 100}}) == "3% · 100%"
+
+
+def test_title_pct_without_a_weekly_shows_the_session_alone():
+    assert m._title_pct({"five_hour": {"utilization": 20}}) == "20%"
+    assert m._title_pct({"five_hour": {"utilization": 20},
+                         "seven_day": {"utilization": "bad"}}) == "20%"
 
 
 def test_title_pct_never_falls_back_to_another_window():
@@ -256,14 +264,14 @@ def test_title_pct_never_falls_back_to_another_window():
     assert m._title_pct({"five_hour": {"utilization": "bad"}}) is None
 
 
-def test_menu_bar_title_shows_session_when_weekly_is_higher():
+def test_menu_bar_title_is_session_then_weekly():
     tmp = tempfile.mkdtemp()
     _isolate(tmp)
     out = _render_main({"five_hour": {"utilization": 20}, "seven_day": {"utilization": 96},
                         "seven_day_opus": {"utilization": 99}})
     title = _title_of(out)
-    assert title.strip() == "20%", title
-    for leaked in ("96", "99", "⚠"):
+    assert title.strip() == "20% · 96%", title
+    for leaked in ("99", "⚠"):
         assert leaked not in title, title
     # the dropdown still carries the full picture
     assert "weekly" in out and "96%" in out and "Opus" in out
@@ -291,21 +299,21 @@ def test_session_row_labelled_and_first():
 
 
 def test_no_menu_bar_window_selector():
-    """The window selector is gone: session-only, so there is nothing to choose."""
+    """The window selector is gone: session · weekly is fixed, nothing to choose."""
     assert not hasattr(m, "display_mode")
     assert not hasattr(m, "do_set_display")
     assert not hasattr(m, "DISPLAY_MODES")
 
 
 def test_stale_menu_bar_config_key_is_ignored():
-    """Upgraders whose config still says menu_bar: weekly get the session number,
-    and the leftover key is left alone rather than rewritten."""
+    """Upgraders whose config still says menu_bar: weekly get session · weekly like
+    everyone else, and the leftover key is left alone rather than rewritten."""
     tmp = tempfile.mkdtemp()
     _isolate(tmp)
     cfg_file = os.path.join(tmp, "config.json")
     json.dump({"menu_bar": "weekly", "accounts": [{"label": "work"}]}, open(cfg_file, "w"))
     out = _render_main({"five_hour": {"utilization": 20}, "seven_day": {"utilization": 96}})
-    assert _title_of(out).strip() == "20%", _title_of(out)
+    assert _title_of(out).strip() == "20% · 96%", _title_of(out)
     assert json.load(open(cfg_file))["menu_bar"] == "weekly"
 
 
@@ -359,7 +367,18 @@ def test_menu_bar_follows_the_configured_order():
               open(os.path.join(tmp, "config.json"), "w"))
     (wl, wd), (pl, pd) = _sessions(("work", 40), ("personal", 96))
     out = _render_main(pd, label=pl, extra=[(wl, wd)])
-    assert _title_of(out).strip() == "W 40% · P 96%", _title_of(out)
+    assert _title_of(out).strip() == "W 40%   P 96%", _title_of(out)
+
+
+def test_menu_bar_with_several_accounts_keeps_each_pair_together():
+    """' · ' joins an account's session and weekly, so accounts are told apart by
+    their initials and a wider gap — never by the same dot."""
+    _isolate(tempfile.mkdtemp())
+    out = _render_main({"five_hour": {"utilization": 40}, "seven_day": {"utilization": 10}},
+                       label="work",
+                       extra=[("personal", {"five_hour": {"utilization": 96},
+                                            "seven_day": {"utilization": 54}})])
+    assert _title_of(out).strip() == "W 40% · 10%   P 96% · 54%", _title_of(out)
 
 
 def test_menu_bar_skips_disabled_accounts_and_keeps_order():
